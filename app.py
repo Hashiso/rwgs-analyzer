@@ -4,6 +4,8 @@ import numpy as np
 import altair as alt
 import os
 import hashlib
+import jwt
+import datetime
 
 # ==========================================
 # ページ設定 & カスタムCSS
@@ -20,30 +22,27 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔐 1. 独自ユーザー認証モジュール (パスワードハッシュ化対応)
+# 🔐 1. 独自ユーザー認証 & クッキー自動ログイン（JWT）
 # ==========================================
 USER_DB_FILE = "users.csv"
+COOKIE_KEY = "rwgs_auth_token"
+JWT_SECRET = "ku_rwgs_secret_key_2026"  # クッキーの改ざん防止用キー
 
 def make_hashes(password):
-    """パスワードを安全にハッシュ化"""
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def check_hashes(password, hashed_password):
-    """入力されたパスワードとハッシュ値を照合"""
     return make_hashes(password) == hashed_password
 
 def load_users():
-    """ユーザーリストの読み込み"""
     if os.path.exists(USER_DB_FILE):
         return pd.read_csv(USER_DB_FILE)
     return pd.DataFrame(columns=["username", "password_hash"])
 
 def add_user(username, password):
-    """新規ユーザーの登録"""
     df = load_users()
     if username in df["username"].values:
         return False
-    
     hashed_pwd = make_hashes(password)
     new_user = pd.DataFrame([[username, hashed_pwd]], columns=["username", "password_hash"])
     df = pd.concat([df, new_user], ignore_index=True)
@@ -51,13 +50,23 @@ def add_user(username, password):
     return True
 
 def login_user(username, password):
-    """ログイン照合"""
     df = load_users()
     user_rows = df[df["username"] == username]
     if not user_rows.empty:
-        hashed_pwd = user_rows.iloc[0]["password_hash"]
-        return check_hashes(password, hashed_pwd)
+        return check_hashes(password, user_rows.iloc[0]["password_hash"])
     return False
+
+# クッキーの発行と読み込み（暗号化トークン）
+def create_token(username):
+    payload = {"username": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+def verify_token(token):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        return payload["username"]
+    except:
+        return None
 
 # セッション状態の初期化
 if "authenticated" not in st.session_state:
@@ -65,21 +74,36 @@ if "authenticated" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state["username"] = ""
 
+# 🔄 自動ログインチェック (ブラウザのクッキーを確認)
+if not st.session_state["authenticated"]:
+    # Streamlitの実験的機能（st.context.cookies）でブラウザのクッキーを読み込む
+    cookies = st.context.cookies
+    if COOKIE_KEY in cookies:
+        saved_user = verify_token(cookies[COOKIE_KEY])
+        if saved_user:
+            st.session_state["authenticated"] = True
+            st.session_state["username"] = saved_user
+
 def login_screen():
     st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer Login</h2>", unsafe_allow_html=True)
     
-    # ログインと新規登録をタブで切り替え
     tab_login, tab_register = st.tabs(["🔑 ログイン", "📝 新規アカウント作成"])
     
     with tab_login:
         login_user_input = st.text_input("ユーザー名", key="login_user")
         login_pass_input = st.text_input("パスワード", type="password", key="login_pass")
+        remember_me = st.checkbox("次回から自動ログイン（状態を保持）", value=True)
+        
         if st.button("ログイン", use_container_width=True):
             if login_user(login_user_input, login_pass_input):
                 st.session_state["authenticated"] = True
                 st.session_state["username"] = login_user_input
-                st.success(f"ログイン成功！ようこそ {login_user_input} さん")
+                
+                # 自動ログインにチェックがある場合、クッキーを設定
+                if remember_me:
+                    token = create_token(login_user_input)
+                    st.context.cookies[COOKIE_KEY] = token
                 st.rerun()
             else:
                 st.error("ユーザー名またはパスワードが正しくありません。")
@@ -99,12 +123,14 @@ def login_screen():
                     st.success("アカウントを作成しました！「ログイン」タブからログインしてください。")
                 else:
                     st.error("このユーザー名はすでに使われています。")
-                    
     st.markdown("</div>", unsafe_allow_html=True)
 
 def logout():
     st.session_state["authenticated"] = False
     st.session_state["username"] = ""
+    # クッキーの削除
+    if COOKIE_KEY in st.context.cookies:
+        del st.context.cookies[COOKIE_KEY]
     st.rerun()
 
 # 認証チェック
@@ -115,7 +141,7 @@ if not st.session_state["authenticated"]:
 current_user = st.session_state["username"]
 
 # ==========================================
-# 分析ロジック群
+# 分析ロジック群（数理統計アルゴリズム）
 # ==========================================
 def get_smart_stage(elapsed_min):
     if pd.isna(elapsed_min) or elapsed_min < 0: return np.nan, "待機"
@@ -127,6 +153,7 @@ def get_smart_stage(elapsed_min):
     return np.nan, "終了"
 
 def auto_optimize_timeline(df):
+    """【数理統計】全探索によるタイムライン最適化アルゴリズム"""
     gc_interval = df['Elapsed_min'].diff().median()
     if pd.isna(gc_interval) or gc_interval <= 0: gc_interval = 2.45
     best_offset, min_score = 0.0, float('inf')
@@ -150,12 +177,11 @@ def calc_metrics(row):
                      index=['Total_Carbon(%)', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)'])
 
 # ==========================================
-# 📊 UI 構築 (認証後画面)
+# 📊 UI 構築
 # ==========================================
 st.markdown("## 🧪 RWGS Catalyst Analytics")
 st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Fully Automated Data Pipeline</p>", unsafe_allow_html=True)
 
-# --- サイドバー (ユーザー専用の検量線) ---
 with st.sidebar:
     st.markdown(f"👤 **ログイン中:** `{current_user}`")
     if st.button("ログアウト", use_container_width=True):
@@ -164,9 +190,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### ⚙️ あなたのキャリブレーション設定")
     
-    # 🌟 ユーザーごとに独立したCSVファイルを自動生成
     USER_CALIB_FILE = f"calib_settings_{current_user}.csv"
-    
     DEFAULT_CALIB = pd.DataFrame({
         'Gas': ['CO2', 'CO', 'CH4'],
         'Slope': [6.473e-07, 1.843e-06, 1.000e-06],
@@ -185,7 +209,6 @@ with st.sidebar:
         edited_calib_df.to_csv(USER_CALIB_FILE, index=False)
         st.success(f"保存しました！次回ログイン時も自動でこの係数が読み込まれます。")
 
-# --- メインエリア ---
 st.markdown("#### 📂 1. Upload Raw Data")
 col1, col2 = st.columns(2)
 with col1: file_ch1 = st.file_uploader("Channel 1 (.Area)", type=['Area', 'txt', 'csv'])
@@ -194,7 +217,7 @@ with col2: file_ch2 = st.file_uploader("Channel 2 (.Area)", type=['Area', 'txt',
 if file_ch1 and file_ch2:
     st.markdown("#### 🚀 2. Execute Analysis")
     if st.button("全自動で解析を実行", type="primary", use_container_width=True):
-        with st.spinner("分析実行中..."):
+        with st.spinner("タイムラインの同期および定常状態の抽出を実行中..."):
             
             df_ch1 = pd.read_csv(file_ch1, sep='\t', skiprows=2, encoding='shift_jis')
             df_ch2 = pd.read_csv(file_ch2, sep='\t', skiprows=2, encoding='shift_jis')
@@ -234,16 +257,16 @@ if file_ch1 and file_ch2:
 
         # --- 結果表示 ---
         st.markdown("---")
-        st.success(f"🤖 **AI Auto-Alignment 完了:** \nデータから逆算し、**測定開始から約 {best_offset:.1f} 分の遅れ** を自動検知してスケジュールを補正しました。")
+        st.success(f"🎯 **タイムライン自動補正 完了:** \nデータ構造を解析し、**測定開始から約 {best_offset:.1f} 分の遅れ** を自動検知してスケジュールを同期しました。")
 
         if not final_result.empty:
             max_temp = final_result['Temperature'].max()
             m1, m2, m3 = st.columns(3)
-            m1.metric(label=f"Max Conversion (@{int(max_temp)}℃)", value=f"{final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
-            m2.metric(label="Detected GC Interval", value=f"{gc_interval:.2f} min")
-            m3.metric(label="Avg. Carbon Balance", value=f"{final_result['Total_Carbon(%)'].mean():.2f} %")
+            m1.metric(label=f"最大転化率 (@{int(max_temp)}℃)", value=f"{final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
+            m2.metric(label="検出されたGC測定間隔", value=f"{gc_interval:.2f} min")
+            m3.metric(label="平均炭素バランス (C-Balance)", value=f"{final_result['Total_Carbon(%)'].mean():.2f} %")
 
-        tab1, tab2 = st.tabs(["📈 Visual Analytics", "📋 Data Export"])
+        tab1, tab2 = st.tabs(["📈 グラフ分析", "📋 定常状態データ一覧"])
         with tab1:
             st.markdown("<br>", unsafe_allow_html=True)
             chart = alt.Chart(df).mark_circle(size=80, opacity=0.9).encode(
