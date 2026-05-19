@@ -2,4 +2,3 @@ pandas
 numpy
 altair
 pyjwt
-extra-streamlit-components
