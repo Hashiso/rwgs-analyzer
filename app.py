@@ -6,7 +6,7 @@ import os
 import hashlib
 import jwt
 import datetime
-import extra_streamlit_components as stx
+import streamlit.components.v1 as components
 
 # ==========================================
 # ページ設定 & カスタムCSS
@@ -23,16 +23,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔐 1. 独自ユーザー認証 & クッキー自動ログイン
+# 🔐 1. 独自ユーザー認証 & LocalStorage自動ログイン（JSハック）
 # ==========================================
 USER_DB_FILE = "users.csv"
-COOKIE_KEY = "rwgs_auth_token"
 JWT_SECRET = "ku_rwgs_secret_key_2026"
-
-# 🌟 安全なクッキーマネージャーの初期化 (エラーの原因だった st.cache_resource を廃止)
-if "cookie_manager" not in st.session_state:
-    st.session_state["cookie_manager"] = stx.CookieManager(key="rwgs_cookie_manager")
-cookie_manager = st.session_state["cookie_manager"]
 
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -73,24 +67,51 @@ def verify_token(token):
     except:
         return None
 
+# セッション状態の初期化
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 if "username" not in st.session_state:
     st.session_state["username"] = ""
+if "logout_triggered" not in st.session_state:
+    st.session_state["logout_triggered"] = False
 
-# 🔄 自動ログインチェック
-if not st.session_state["authenticated"]:
-    token = cookie_manager.get(COOKIE_KEY)
-    if token:
+# 🔄 自動ログインチェック（URLの隠しパラメータからトークンを読み取る）
+if not st.session_state["authenticated"] and not st.session_state["logout_triggered"]:
+    if "token" in st.query_params:
+        token = st.query_params["token"]
         saved_user = verify_token(token)
         if saved_user:
             st.session_state["authenticated"] = True
             st.session_state["username"] = saved_user
+            # URLを綺麗にするためにパラメータを消去してリラン
+            del st.query_params["token"]
+            st.rerun()
+        else:
+            del st.query_params["token"]
+
+# ログアウト直後のフラグをリセット
+if st.session_state["logout_triggered"] and "token" not in st.query_params:
+    st.session_state["logout_triggered"] = False
 
 def login_screen():
     st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer Login</h2>", unsafe_allow_html=True)
     
+    # 📡 ブラウザのLocalStorageから自動でトークンを掘り起こしてURLに投げるJS（非表示）
+    if "token" not in st.query_params and not st.session_state["logout_triggered"]:
+        components.html("""
+        <script>
+        const token = localStorage.getItem('rwgs_auth_token');
+        if (token) {
+            const url = new URL(window.location.href);
+            if (url.searchParams.get('token') !== token) {
+                url.searchParams.set('token', token);
+                window.location.href = url.href;
+            }
+        }
+        </script>
+        """, height=0)
+
     tab_login, tab_register = st.tabs(["🔑 ログイン", "📝 新規アカウント作成"])
     
     with tab_login:
@@ -100,13 +121,23 @@ def login_screen():
         
         if st.button("ログイン", use_container_width=True):
             if login_user(login_user_input, login_pass_input):
-                st.session_state["authenticated"] = True
-                st.session_state["username"] = login_user_input
-                
                 if remember_me:
+                    # 💡LocalStorageにトークンをねじ込み、自身をリロードさせるJSを出力
                     token = create_token(login_user_input)
-                    cookie_manager.set(COOKIE_KEY, token, max_age=30*24*60*60)
-                st.rerun()
+                    components.html(f"""
+                    <script>
+                    localStorage.setItem('rwgs_auth_token', '{token}');
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('token', '{token}');
+                    window.location.href = url.href;
+                    </script>
+                    """, height=0)
+                    st.success("ログイン成功！自動ログインを設定中...")
+                    st.stop()
+                else:
+                    st.session_state["authenticated"] = True
+                    st.session_state["username"] = login_user_input
+                    st.rerun()
             else:
                 st.error("ユーザー名またはパスワードが正しくありません。")
                 
@@ -130,8 +161,17 @@ def login_screen():
 def logout():
     st.session_state["authenticated"] = False
     st.session_state["username"] = ""
-    cookie_manager.delete(COOKIE_KEY)
-    st.rerun()
+    st.session_state["logout_triggered"] = True
+    # 💡LocalStorageからトークンを剥ぎ取ってリロードするJSを出力
+    components.html("""
+    <script>
+    localStorage.removeItem('rwgs_auth_token');
+    const url = new URL(window.location.href);
+    url.searchParams.delete('token');
+    window.location.href = url.href;
+    </script>
+    """, height=0)
+    st.stop()
 
 # 認証チェック
 if not st.session_state["authenticated"]:
