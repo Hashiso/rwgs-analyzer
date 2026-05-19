@@ -29,12 +29,10 @@ USER_DB_FILE = "users.csv"
 COOKIE_KEY = "rwgs_auth_token"
 JWT_SECRET = "ku_rwgs_secret_key_2026"
 
-# クッキーマネージャーの初期化（キャッシュを利用して高速化）
-@st.cache_resource(experimental_allow_widgets=True)
-def get_manager():
-    return stx.CookieManager()
-
-cookie_manager = get_manager()
+# 🌟 安全なクッキーマネージャーの初期化 (エラーの原因だった st.cache_resource を廃止)
+if "cookie_manager" not in st.session_state:
+    st.session_state["cookie_manager"] = stx.CookieManager(key="rwgs_cookie_manager")
+cookie_manager = st.session_state["cookie_manager"]
 
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -80,7 +78,7 @@ if "authenticated" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state["username"] = ""
 
-# 🔄 自動ログインチェック (正しくCookieManagerから取得)
+# 🔄 自動ログインチェック
 if not st.session_state["authenticated"]:
     token = cookie_manager.get(COOKIE_KEY)
     if token:
@@ -105,7 +103,6 @@ def login_screen():
                 st.session_state["authenticated"] = True
                 st.session_state["username"] = login_user_input
                 
-                # 自動ログインがオンならCookieを保存 (30日間有効)
                 if remember_me:
                     token = create_token(login_user_input)
                     cookie_manager.set(COOKIE_KEY, token, max_age=30*24*60*60)
