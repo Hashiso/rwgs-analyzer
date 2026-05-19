@@ -6,7 +6,6 @@ import os
 import hashlib
 import jwt
 import datetime
-import streamlit.components.v1 as components
 
 # ==========================================
 # ページ設定 & カスタムCSS
@@ -23,7 +22,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔐 1. 独自ユーザー認証 & LocalStorage自動ログイン（JSハック）
+# 🔐 1. 独自ユーザー認証 & マジックリンク自動ログイン
 # ==========================================
 USER_DB_FILE = "users.csv"
 JWT_SECRET = "ku_rwgs_secret_key_2026"
@@ -72,72 +71,32 @@ if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 if "username" not in st.session_state:
     st.session_state["username"] = ""
-if "logout_triggered" not in st.session_state:
-    st.session_state["logout_triggered"] = False
 
-# 🔄 自動ログインチェック（URLの隠しパラメータからトークンを読み取る）
-if not st.session_state["authenticated"] and not st.session_state["logout_triggered"]:
-    if "token" in st.query_params:
-        token = st.query_params["token"]
+# 🔄 URLパラメータ（?auth=xxxx）からの自動ログインチェック
+if not st.session_state["authenticated"]:
+    if "auth" in st.query_params:
+        token = st.query_params["auth"]
         saved_user = verify_token(token)
         if saved_user:
             st.session_state["authenticated"] = True
             st.session_state["username"] = saved_user
-            # URLを綺麗にするためにパラメータを消去してリラン
-            del st.query_params["token"]
             st.rerun()
-        else:
-            del st.query_params["token"]
-
-# ログアウト直後のフラグをリセット
-if st.session_state["logout_triggered"] and "token" not in st.query_params:
-    st.session_state["logout_triggered"] = False
 
 def login_screen():
     st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer Login</h2>", unsafe_allow_html=True)
     
-    # 📡 ブラウザのLocalStorageから自動でトークンを掘り起こしてURLに投げるJS（非表示）
-    if "token" not in st.query_params and not st.session_state["logout_triggered"]:
-        components.html("""
-        <script>
-        const token = localStorage.getItem('rwgs_auth_token');
-        if (token) {
-            const url = new URL(window.location.href);
-            if (url.searchParams.get('token') !== token) {
-                url.searchParams.set('token', token);
-                window.location.href = url.href;
-            }
-        }
-        </script>
-        """, height=0)
-
     tab_login, tab_register = st.tabs(["🔑 ログイン", "📝 新規アカウント作成"])
     
     with tab_login:
         login_user_input = st.text_input("ユーザー名", key="login_user")
         login_pass_input = st.text_input("パスワード", type="password", key="login_pass")
-        remember_me = st.checkbox("次回から自動ログイン（状態を保持）", value=True)
         
         if st.button("ログイン", use_container_width=True):
             if login_user(login_user_input, login_pass_input):
-                if remember_me:
-                    # 💡LocalStorageにトークンをねじ込み、自身をリロードさせるJSを出力
-                    token = create_token(login_user_input)
-                    components.html(f"""
-                    <script>
-                    localStorage.setItem('rwgs_auth_token', '{token}');
-                    const url = new URL(window.location.href);
-                    url.searchParams.set('token', '{token}');
-                    window.location.href = url.href;
-                    </script>
-                    """, height=0)
-                    st.success("ログイン成功！自動ログインを設定中...")
-                    st.stop()
-                else:
-                    st.session_state["authenticated"] = True
-                    st.session_state["username"] = login_user_input
-                    st.rerun()
+                st.session_state["authenticated"] = True
+                st.session_state["username"] = login_user_input
+                st.rerun()
             else:
                 st.error("ユーザー名またはパスワードが正しくありません。")
                 
@@ -161,17 +120,9 @@ def login_screen():
 def logout():
     st.session_state["authenticated"] = False
     st.session_state["username"] = ""
-    st.session_state["logout_triggered"] = True
-    # 💡LocalStorageからトークンを剥ぎ取ってリロードするJSを出力
-    components.html("""
-    <script>
-    localStorage.removeItem('rwgs_auth_token');
-    const url = new URL(window.location.href);
-    url.searchParams.delete('token');
-    window.location.href = url.href;
-    </script>
-    """, height=0)
-    st.stop()
+    if "auth" in st.query_params:
+        del st.query_params["auth"]
+    st.rerun()
 
 # 認証チェック
 if not st.session_state["authenticated"]:
@@ -223,6 +174,15 @@ st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Fully
 
 with st.sidebar:
     st.markdown(f"👤 **ログイン中:** `{current_user}`")
+    
+    # 🌟 自動ログイン用マジックリンクの提示
+    user_token = create_token(current_user)
+    magic_url = f"https://rwgs-analyzer.streamlit.app/?auth={user_token}"
+    
+    with st.expander("🔗 次回から自動ログインする"):
+        st.caption("以下のURLをブラウザの「ブックマーク（お気に入り）」に登録してください。次回からパスワード入力なしで直接この解析画面が開きます。")
+        st.code(magic_url, language="text")
+        
     if st.button("ログアウト", use_container_width=True):
         logout()
     
