@@ -100,6 +100,12 @@ if file_ch1 is not None and file_ch2 is not None:
 
             # データ結合
             df = pd.merge(df_ch1, df_ch2, on=['Date', 'Time'], suffixes=('_ch1', '_ch2'))
+            
+            # 🌟【修正箇所】文字列になってしまった空白データを数値(0)に強制変換
+            for col in ['CO2', 'CO', 'CH4']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
             df['Datetime'] = pd.to_datetime(df['Date'] + ' ' + df['Time'])
             start_time = df['Datetime'].iloc[0]
             df['Elapsed_min'] = (df['Datetime'] - start_time).dt.total_seconds() / 60.0
