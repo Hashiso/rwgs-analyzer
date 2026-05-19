@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+import os
+import hashlib
 
 # ==========================================
 # ページ設定 & カスタムCSS
@@ -13,99 +15,175 @@ st.markdown("""
     html, body, [class*="css"] { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
     .stButton>button { border-radius: 8px; background-color: #2b3a4a; color: white; font-weight: 600; border: none; padding: 0.5rem 1rem; }
     .stButton>button:hover { background-color: #1a252f; }
+    .auth-box { max-width: 400px; margin: 50px auto; padding: 30px; border-radius: 10px; background-color: #f8f9fa; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     </style>
 """, unsafe_allow_html=True)
+
+# ==========================================
+# 🔐 1. 独自ユーザー認証モジュール (パスワードハッシュ化対応)
+# ==========================================
+USER_DB_FILE = "users.csv"
+
+def make_hashes(password):
+    """パスワードを安全にハッシュ化"""
+    return hashlib.sha256(str.encode(password)).hexdigest()
+
+def check_hashes(password, hashed_password):
+    """入力されたパスワードとハッシュ値を照合"""
+    return make_hashes(password) == hashed_password
+
+def load_users():
+    """ユーザーリストの読み込み"""
+    if os.path.exists(USER_DB_FILE):
+        return pd.read_csv(USER_DB_FILE)
+    return pd.DataFrame(columns=["username", "password_hash"])
+
+def add_user(username, password):
+    """新規ユーザーの登録"""
+    df = load_users()
+    if username in df["username"].values:
+        return False
+    
+    hashed_pwd = make_hashes(password)
+    new_user = pd.DataFrame([[username, hashed_pwd]], columns=["username", "password_hash"])
+    df = pd.concat([df, new_user], ignore_index=True)
+    df.to_csv(USER_DB_FILE, index=False)
+    return True
+
+def login_user(username, password):
+    """ログイン照合"""
+    df = load_users()
+    user_rows = df[df["username"] == username]
+    if not user_rows.empty:
+        hashed_pwd = user_rows.iloc[0]["password_hash"]
+        return check_hashes(password, hashed_pwd)
+    return False
+
+# セッション状態の初期化
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+if "username" not in st.session_state:
+    st.session_state["username"] = ""
+
+def login_screen():
+    st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer Login</h2>", unsafe_allow_html=True)
+    
+    # ログインと新規登録をタブで切り替え
+    tab_login, tab_register = st.tabs(["🔑 ログイン", "📝 新規アカウント作成"])
+    
+    with tab_login:
+        login_user_input = st.text_input("ユーザー名", key="login_user")
+        login_pass_input = st.text_input("パスワード", type="password", key="login_pass")
+        if st.button("ログイン", use_container_width=True):
+            if login_user(login_user_input, login_pass_input):
+                st.session_state["authenticated"] = True
+                st.session_state["username"] = login_user_input
+                st.success(f"ログイン成功！ようこそ {login_user_input} さん")
+                st.rerun()
+            else:
+                st.error("ユーザー名またはパスワードが正しくありません。")
+                
+    with tab_register:
+        reg_user_input = st.text_input("希望するユーザー名", key="reg_user")
+        reg_pass_input = st.text_input("パスワードを設定", type="password", key="reg_pass")
+        reg_pass_confirm = st.text_input("パスワード（確認用）", type="password", key="reg_pass_conf")
+        
+        if st.button("新規アカウントを登録", use_container_width=True):
+            if not reg_user_input.strip() or not reg_pass_input.strip():
+                st.error("ユーザー名とパスワードを入力してください。")
+            elif reg_pass_input != reg_pass_confirm:
+                st.error("パスワードが一致しません。")
+            else:
+                if add_user(reg_user_input.strip(), reg_pass_input.strip()):
+                    st.success("アカウントを作成しました！「ログイン」タブからログインしてください。")
+                else:
+                    st.error("このユーザー名はすでに使われています。")
+                    
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def logout():
+    st.session_state["authenticated"] = False
+    st.session_state["username"] = ""
+    st.rerun()
+
+# 認証チェック
+if not st.session_state["authenticated"]:
+    login_screen()
+    st.stop()
+
+current_user = st.session_state["username"]
 
 # ==========================================
 # 分析ロジック群
 # ==========================================
 def get_smart_stage(elapsed_min):
-    """スケジュール定義 (昇温時間+安定化のためのバッファを除外して判定)"""
     if pd.isna(elapsed_min) or elapsed_min < 0: return np.nan, "待機"
-    
-    # (開始時間, 終了時間, 温度)
-    schedule = [
-        (0, 20, 100), (20, 40, 200), (40, 60, 300), (60, 80, 350),
-        (80, 103, 400), (103, 126, 450), (126, 149, 500), (149, 172, 550), (172, 195, 600)
-    ]
-    
+    schedule = [(0, 20, 100), (20, 40, 200), (40, 60, 300), (60, 80, 350), (80, 103, 400), (103, 126, 450), (126, 149, 500), (149, 172, 550), (172, 195, 600)]
     for start, end, temp in schedule:
         if start <= elapsed_min < end:
-            # 最初の8分間は「昇温 ＋ 安定化待ち」として問答無用で除外
-            if elapsed_min < start + 8:
-                return np.nan, f"昇温/安定化 (→{temp}℃)"
-            else:
-                return temp, f"維持 ({temp}℃)"
+            if elapsed_min < start + 8: return np.nan, f"昇温/安定化 (→{temp}℃)"
+            else: return temp, f"維持 ({temp}℃)"
     return np.nan, "終了"
 
 def auto_optimize_timeline(df):
-    """AI自動判定：定常状態のばらつき(分散)が最小になるオフセットを全自動探索"""
     gc_interval = df['Elapsed_min'].diff().median()
     if pd.isna(gc_interval) or gc_interval <= 0: gc_interval = 2.45
-        
-    best_offset = 0.0
-    min_score = float('inf')
+    best_offset, min_score = 0.0, float('inf')
     
-    # 0分〜40分までの遅れを0.5分刻みで総当たり検証
     for offset in np.arange(0, 40, 0.5):
-        t_furnace = df['Elapsed_min'] - offset
-        stages = t_furnace.apply(lambda x: get_smart_stage(x)[0])
-        
+        stages = (df['Elapsed_min'] - offset).apply(lambda x: get_smart_stage(x)[0])
         df_temp = pd.DataFrame({'Temp': stages, 'CO': df['CO_Conc']}).dropna()
-        if len(df_temp['Temp'].unique()) < 8: continue # データが少なすぎる場合は除外
-            
-        # 抽出されたプラトーのばらつき（標準偏差）の合計
-        var_sum = df_temp.groupby('Temp')['CO'].std().fillna(0).sum()
-        
-        # 600℃でCOが最大になっていない場合は不正なズレとしてペナルティ
+        if len(df_temp['Temp'].unique()) < 8: continue
+        score = df_temp.groupby('Temp')['CO'].std().fillna(0).sum()
         means = df_temp.groupby('Temp')['CO'].mean()
-        penalty = 10000 if (means.empty or means.idxmax() != 600) else 0
-            
-        score = var_sum + penalty
-        if score < min_score:
-            min_score = score
-            best_offset = offset
-            
+        if means.empty or means.idxmax() != 600: score += 10000
+        if score < min_score: min_score, best_offset = score, offset
     return best_offset, gc_interval
 
 def calc_metrics(row):
-    co_conc = row.get('CO_Conc', 0)
-    ch4_conc = row.get('CH4_Conc', 0)
-    co2_conc = row.get('CO2_Conc', 0)
-    
+    co_conc, ch4_conc, co2_conc = row.get('CO_Conc', 0), row.get('CH4_Conc', 0), row.get('CO2_Conc', 0)
     total_c = co2_conc + co_conc + ch4_conc
     conversion = (co_conc + ch4_conc) / total_c * 100 if total_c > 0 else 0
     prod_c = co_conc + ch4_conc
-    sel_co = co_conc / prod_c * 100 if prod_c > 0 else 0
-    sel_ch4 = ch4_conc / prod_c * 100 if prod_c > 0 else 0
-    
-    return pd.Series([total_c, conversion, sel_co, sel_ch4], 
+    return pd.Series([total_c, conversion, co_conc / prod_c * 100 if prod_c > 0 else 0, ch4_conc / prod_c * 100 if prod_c > 0 else 0], 
                      index=['Total_Carbon(%)', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)'])
 
 # ==========================================
-# UI 構築
+# 📊 UI 構築 (認証後画面)
 # ==========================================
 st.markdown("## 🧪 RWGS Catalyst Analytics")
 st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Fully Automated Data Pipeline</p>", unsafe_allow_html=True)
 
-# --- サイドバー (検量線のみ) ---
+# --- サイドバー (ユーザー専用の検量線) ---
 with st.sidebar:
-    st.markdown("### ⚙️ キャリブレーション")
+    st.markdown(f"👤 **ログイン中:** `{current_user}`")
+    if st.button("ログアウト", use_container_width=True):
+        logout()
+    
+    st.markdown("---")
+    st.markdown("### ⚙️ あなたのキャリブレーション設定")
+    
+    # 🌟 ユーザーごとに独立したCSVファイルを自動生成
+    USER_CALIB_FILE = f"calib_settings_{current_user}.csv"
+    
     DEFAULT_CALIB = pd.DataFrame({
         'Gas': ['CO2', 'CO', 'CH4'],
         'Slope': [6.473e-07, 1.843e-06, 1.000e-06],
         'Intercept': [-0.0387, 0.1918, 0.0]
     })
-    if 'calib_df' not in st.session_state: st.session_state['calib_df'] = DEFAULT_CALIB.copy()
     
-    uploaded_calib = st.file_uploader("設定読込", type=['csv'])
-    if uploaded_calib:
-        try: st.session_state['calib_df'] = pd.read_csv(uploaded_calib)
-        except: pass
+    if os.path.exists(USER_CALIB_FILE):
+        user_calib_df = pd.read_csv(USER_CALIB_FILE)
+    else:
+        user_calib_df = DEFAULT_CALIB.copy()
     
-    edited_calib_df = st.data_editor(st.session_state['calib_df'], num_rows="dynamic", hide_index=True, use_container_width=True)
+    edited_calib_df = st.data_editor(user_calib_df, num_rows="dynamic", hide_index=True, use_container_width=True)
     calib_dict = edited_calib_df.set_index('Gas').to_dict(orient='index')
-    st.download_button("💾 係数を保存", data=edited_calib_df.to_csv(index=False).encode('utf-8'), file_name="calib_settings.csv", mime="text/csv")
+    
+    if st.button("💾 この係数を自分の設定として保存"):
+        edited_calib_df.to_csv(USER_CALIB_FILE, index=False)
+        st.success(f"保存しました！次回ログイン時も自動でこの係数が読み込まれます。")
 
 # --- メインエリア ---
 st.markdown("#### 📂 1. Upload Raw Data")
@@ -116,9 +194,8 @@ with col2: file_ch2 = st.file_uploader("Channel 2 (.Area)", type=['Area', 'txt',
 if file_ch1 and file_ch2:
     st.markdown("#### 🚀 2. Execute Analysis")
     if st.button("全自動で解析を実行", type="primary", use_container_width=True):
-        with st.spinner("AIが昇温タイミングを推論し、最適な定常状態を抽出しています..."):
+        with st.spinner("分析実行中..."):
             
-            # データ読み込み・クレンジング
             df_ch1 = pd.read_csv(file_ch1, sep='\t', skiprows=2, encoding='shift_jis')
             df_ch2 = pd.read_csv(file_ch2, sep='\t', skiprows=2, encoding='shift_jis')
             df_ch1.columns, df_ch2.columns = df_ch1.columns.str.strip(), df_ch2.columns.str.strip()
@@ -128,7 +205,6 @@ if file_ch1 and file_ch2:
             for col in ['CO2', 'CO', 'CH4', 'N2']:
                 if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            # 時間計算
             df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
             if df['Datetime'].isna().sum() < len(df) * 0.5:
                 start_time = df['Datetime'].dropna().iloc[0]
@@ -137,76 +213,49 @@ if file_ch1 and file_ch2:
             else:
                 df['Elapsed_min'] = pd.Series(range(len(df))) * 2.45
 
-            # 濃度計算
-            df['CO2_Conc'] = (df['CO2'] * calib_dict['CO2']['Slope'] + calib_dict['CO2']['Intercept']).clip(lower=0)
-            df['CO_Conc'] = (df['CO'] * calib_dict['CO']['Slope'] + calib_dict['CO']['Intercept']).clip(lower=0)
-            df['CH4_Conc'] = (df['CH4'] * calib_dict['CH4']['Slope'] + calib_dict['CH4']['Intercept']).clip(lower=0)
+            df['CO2_Conc'] = (df['CO2'] * calib_dict.get('CO2', {}).get('Slope', 1) + calib_dict.get('CO2', {}).get('Intercept', 0)).clip(lower=0)
+            df['CO_Conc'] = (df['CO'] * calib_dict.get('CO', {}).get('Slope', 1) + calib_dict.get('CO', {}).get('Intercept', 0)).clip(lower=0)
+            df['CH4_Conc'] = (df['CH4'] * calib_dict.get('CH4', {}).get('Slope', 1) + calib_dict.get('CH4', {}).get('Intercept', 0)).clip(lower=0)
             
-            # --- AIによるアラインメント（判断をアプリに任せる） ---
             best_offset, gc_interval = auto_optimize_timeline(df)
-            
-            # 決定されたタイムラインを適用
             df['Furnace_Time_min'] = df['Elapsed_min'] - best_offset
             stage_info = df['Furnace_Time_min'].apply(get_smart_stage)
-            df['Temperature'] = [x[0] for x in stage_info]
-            df['Stage'] = [x[1] for x in stage_info]
+            df['Temperature'], df['Stage'] = [x[0] for x in stage_info], [x[1] for x in stage_info]
             
-            # メトリクス計算
             df = pd.concat([df, df.apply(calc_metrics, axis=1)], axis=1)
-
-            # ステータスのラベリング（グラフ可視化用）
             df['Status'] = '❌ 昇温中・安定化待ち (除外)'
             df.loc[df['Temperature'].notna(), 'Status'] = '⚠️ プラトー前半 (除外)'
             
-            # 各温度ごとに、抽出対象となる「最後の3点」を特定
             steady_indices = df.dropna(subset=['Temperature']).groupby('Temperature').tail(3).index
             df.loc[steady_indices, 'Status'] = '✅ 定常状態 (抽出対象)'
 
-            # 最終結果の集計
             final_result = df.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
-            output_columns = ['Temperature', 'Total_Carbon(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']
-            final_result = final_result[output_columns]
+            final_result = final_result[['Temperature', 'Total_Carbon(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']]
 
-        # ==========================================
-        # 結果表示
-        # ==========================================
+        # --- 結果表示 ---
         st.markdown("---")
         st.success(f"🤖 **AI Auto-Alignment 完了:** \nデータから逆算し、**測定開始から約 {best_offset:.1f} 分の遅れ** を自動検知してスケジュールを補正しました。")
 
-        # KPI メトリクス
         if not final_result.empty:
             max_temp = final_result['Temperature'].max()
-            max_conv = final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]
-            avg_carbon = final_result['Total_Carbon(%)'].mean()
-            
             m1, m2, m3 = st.columns(3)
-            m1.metric(label=f"Max Conversion (@{int(max_temp)}℃)", value=f"{max_conv:.2f} %")
+            m1.metric(label=f"Max Conversion (@{int(max_temp)}℃)", value=f"{final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
             m2.metric(label="Detected GC Interval", value=f"{gc_interval:.2f} min")
-            m3.metric(label="Avg. Carbon Balance", value=f"{avg_carbon:.2f} %")
+            m3.metric(label="Avg. Carbon Balance", value=f"{final_result['Total_Carbon(%)'].mean():.2f} %")
 
         tab1, tab2 = st.tabs(["📈 Visual Analytics", "📋 Data Export"])
-        
         with tab1:
             st.markdown("<br>", unsafe_allow_html=True)
-            # Altairグラフ
             chart = alt.Chart(df).mark_circle(size=80, opacity=0.9).encode(
                 x=alt.X('Furnace_Time_min:Q', title='電気炉稼働時間 (分)', axis=alt.Axis(grid=False)),
                 y=alt.Y('CO_Conc:Q', title='CO 濃度 (%)', axis=alt.Axis(gridColor='#f0f0f0')),
-                color=alt.Color('Status:N', 
-                                title='データ判定',
-                                scale=alt.Scale(
-                                    domain=['✅ 定常状態 (抽出対象)', '⚠️ プラトー前半 (除外)', '❌ 昇温中・安定化待ち (除外)'],
-                                    range=['#10b981', '#f59e0b', '#ef4444']
-                                )),
+                color=alt.Color('Status:N', title='データ判定', scale=alt.Scale(domain=['✅ 定常状態 (抽出対象)', '⚠️ プラトー前半 (除外)', '❌ 昇温中・安定化待ち (除外)'], range=['#10b981', '#f59e0b', '#ef4444'])),
                 tooltip=['Furnace_Time_min', 'Temperature', 'CO_Conc', 'CO2_Conversion(%)', 'Status']
             ).properties(height=400).interactive()
-            
             st.altair_chart(chart, use_container_width=True)
 
         with tab2:
             st.markdown("<br>", unsafe_allow_html=True)
-            # エラーの原因だった background_gradient を削除し、シンプルなフォーマットに変更
             st.dataframe(final_result.style.format("{:.3f}"), use_container_width=True)
-            
             csv = final_result.to_csv(index=False).encode('shift_jis')
-            st.download_button(label="📥 結果をCSVでダウンロード", data=csv, file_name='RWGS_Result_AutoAligned.csv', mime='text/csv')
+            st.download_button(label="📥 結果をCSVでダウンロード", data=csv, file_name=f'RWGS_Result_{current_user}.csv', mime='text/csv')
