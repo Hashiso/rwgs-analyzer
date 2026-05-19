@@ -6,6 +6,7 @@ import os
 import hashlib
 import jwt
 import datetime
+import extra_streamlit_components as stx
 
 # ==========================================
 # ページ設定 & カスタムCSS
@@ -22,11 +23,18 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔐 1. 独自ユーザー認証 & クッキー自動ログイン（JWT）
+# 🔐 1. 独自ユーザー認証 & クッキー自動ログイン
 # ==========================================
 USER_DB_FILE = "users.csv"
 COOKIE_KEY = "rwgs_auth_token"
-JWT_SECRET = "ku_rwgs_secret_key_2026"  # クッキーの改ざん防止用キー
+JWT_SECRET = "ku_rwgs_secret_key_2026"
+
+# クッキーマネージャーの初期化（キャッシュを利用して高速化）
+@st.cache_resource(experimental_allow_widgets=True)
+def get_manager():
+    return stx.CookieManager()
+
+cookie_manager = get_manager()
 
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -56,7 +64,6 @@ def login_user(username, password):
         return check_hashes(password, user_rows.iloc[0]["password_hash"])
     return False
 
-# クッキーの発行と読み込み（暗号化トークン）
 def create_token(username):
     payload = {"username": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)}
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
@@ -68,18 +75,16 @@ def verify_token(token):
     except:
         return None
 
-# セッション状態の初期化
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 if "username" not in st.session_state:
     st.session_state["username"] = ""
 
-# 🔄 自動ログインチェック (ブラウザのクッキーを確認)
+# 🔄 自動ログインチェック (正しくCookieManagerから取得)
 if not st.session_state["authenticated"]:
-    # Streamlitの実験的機能（st.context.cookies）でブラウザのクッキーを読み込む
-    cookies = st.context.cookies
-    if COOKIE_KEY in cookies:
-        saved_user = verify_token(cookies[COOKIE_KEY])
+    token = cookie_manager.get(COOKIE_KEY)
+    if token:
+        saved_user = verify_token(token)
         if saved_user:
             st.session_state["authenticated"] = True
             st.session_state["username"] = saved_user
@@ -100,10 +105,10 @@ def login_screen():
                 st.session_state["authenticated"] = True
                 st.session_state["username"] = login_user_input
                 
-                # 自動ログインにチェックがある場合、クッキーを設定
+                # 自動ログインがオンならCookieを保存 (30日間有効)
                 if remember_me:
                     token = create_token(login_user_input)
-                    st.context.cookies[COOKIE_KEY] = token
+                    cookie_manager.set(COOKIE_KEY, token, max_age=30*24*60*60)
                 st.rerun()
             else:
                 st.error("ユーザー名またはパスワードが正しくありません。")
@@ -128,9 +133,7 @@ def login_screen():
 def logout():
     st.session_state["authenticated"] = False
     st.session_state["username"] = ""
-    # クッキーの削除
-    if COOKIE_KEY in st.context.cookies:
-        del st.context.cookies[COOKIE_KEY]
+    cookie_manager.delete(COOKIE_KEY)
     st.rerun()
 
 # 認証チェック
@@ -153,7 +156,6 @@ def get_smart_stage(elapsed_min):
     return np.nan, "終了"
 
 def auto_optimize_timeline(df):
-    """【数理統計】全探索によるタイムライン最適化アルゴリズム"""
     gc_interval = df['Elapsed_min'].diff().median()
     if pd.isna(gc_interval) or gc_interval <= 0: gc_interval = 2.45
     best_offset, min_score = 0.0, float('inf')
@@ -255,7 +257,6 @@ if file_ch1 and file_ch2:
             final_result = df.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
             final_result = final_result[['Temperature', 'Total_Carbon(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']]
 
-        # --- 結果表示 ---
         st.markdown("---")
         st.success(f"🎯 **タイムライン自動補正 完了:** \nデータ構造を解析し、**測定開始から約 {best_offset:.1f} 分の遅れ** を自動検知してスケジュールを同期しました。")
 
