@@ -66,13 +66,11 @@ def verify_token(token):
     except:
         return None
 
-# セッション状態の初期化
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 if "username" not in st.session_state:
     st.session_state["username"] = ""
 
-# 🔄 URLパラメータ（?auth=xxxx）からの自動ログインチェック
 if not st.session_state["authenticated"]:
     if "auth" in st.query_params:
         token = st.query_params["auth"]
@@ -124,7 +122,6 @@ def logout():
         del st.query_params["auth"]
     st.rerun()
 
-# 認証チェック
 if not st.session_state["authenticated"]:
     login_screen()
     st.stop()
@@ -136,7 +133,8 @@ current_user = st.session_state["username"]
 # ==========================================
 def get_smart_stage(elapsed_min):
     if pd.isna(elapsed_min) or elapsed_min < 0: return np.nan, "待機"
-    schedule = [(0, 20, 100), (20, 40, 200), (40, 60, 300), (60, 80, 350), (80, 103, 400), (103, 126, 450), (126, 149, 500), (149, 172, 550), (172, 195, 600)]
+    # 🌟 600℃の維持時間を長め(999分)に設定し、長時間の実験でも途切れないように修正
+    schedule = [(0, 20, 100), (20, 40, 200), (40, 60, 300), (60, 80, 350), (80, 103, 400), (103, 126, 450), (126, 149, 500), (149, 172, 550), (172, 999, 600)]
     for start, end, temp in schedule:
         if start <= elapsed_min < end:
             if elapsed_min < start + 8: return np.nan, f"昇温/安定化 (→{temp}℃)"
@@ -151,11 +149,22 @@ def auto_optimize_timeline(df):
     for offset in np.arange(0, 40, 0.5):
         stages = (df['Elapsed_min'] - offset).apply(lambda x: get_smart_stage(x)[0])
         df_temp = pd.DataFrame({'Temp': stages, 'CO': df['CO_Conc']}).dropna()
-        if len(df_temp['Temp'].unique()) < 8: continue
-        score = df_temp.groupby('Temp')['CO'].std().fillna(0).sum()
+        
+        # 🌟 データが少ない実験でもエラーにならないよう柔軟に評価
+        unique_stages = df_temp['Temp'].nunique()
+        if unique_stages < 1: 
+            continue
+            
+        std_sum = df_temp.groupby('Temp')['CO'].std().fillna(0).sum()
         means = df_temp.groupby('Temp')['CO'].mean()
-        if means.empty or means.idxmax() != 600: score += 10000
-        if score < min_score: min_score, best_offset = score, offset
+        max_temp_in_data = means.index.max()
+        
+        penalty = 10000 if (not means.empty and means.idxmax() != max_temp_in_data) else 0
+        
+        score = std_sum / unique_stages + penalty
+        if score < min_score: 
+            min_score, best_offset = score, offset
+            
     return best_offset, gc_interval
 
 def calc_metrics(row):
@@ -175,7 +184,6 @@ st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Fully
 with st.sidebar:
     st.markdown(f"👤 **ログイン中:** `{current_user}`")
     
-    # 🌟 自動ログイン用マジックリンクの提示
     user_token = create_token(current_user)
     magic_url = f"https://rwgs-analyzer.streamlit.app/?auth={user_token}"
     
@@ -227,11 +235,17 @@ if file_ch1 and file_ch2:
             for col in ['CO2', 'CO', 'CH4', 'N2']:
                 if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
+            # 時間計算
             df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
+            
+            # 🌟【重要】Micro GCの「最後のデータが一番上に来るバグ」を回避するため、必ず時系列順（古い順）に並び替える
+            df = df.sort_values('Datetime').reset_index(drop=True)
+            
             if df['Datetime'].isna().sum() < len(df) * 0.5:
-                start_time = df['Datetime'].dropna().iloc[0]
+                # ソート済みの最も古い時間をスタート時間に設定
+                start_time = df['Datetime'].dropna().min()
                 df['Elapsed_min'] = (df['Datetime'] - start_time).dt.total_seconds() / 60.0
-                df['Elapsed_min'] = df['Elapsed_min'].fillna(pd.Series(range(len(df))) * 2.45)
+                df['Elapsed_min'] = df['Elapsed_min'].interpolate(method='linear').fillna(pd.Series(range(len(df))) * 2.45)
             else:
                 df['Elapsed_min'] = pd.Series(range(len(df))) * 2.45
 
