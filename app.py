@@ -133,12 +133,25 @@ current_user = st.session_state["username"]
 # ==========================================
 def get_smart_stage(elapsed_min):
     if pd.isna(elapsed_min) or elapsed_min < 0: return np.nan, "待機"
-    # 🌟 600℃の維持時間を長め(999分)に設定し、長時間の実験でも途切れないように修正
-    schedule = [(0, 20, 100), (20, 40, 200), (40, 60, 300), (60, 80, 350), (80, 103, 400), (103, 126, 450), (126, 149, 500), (149, 172, 550), (172, 999, 600)]
+    
+    # 🌟 195分で600℃完了までのスケジュール
+    schedule = [
+        (0, 20, 100), (20, 40, 200), (40, 60, 300), (60, 80, 350), 
+        (80, 103, 400), (103, 126, 450), (126, 149, 500), 
+        (149, 172, 550), (172, 195, 600)
+    ]
+    
     for start, end, temp in schedule:
         if start <= elapsed_min < end:
-            if elapsed_min < start + 8: return np.nan, f"昇温/安定化 (→{temp}℃)"
-            else: return temp, f"維持 ({temp}℃)"
+            if elapsed_min < start + 8: 
+                return np.nan, f"昇温/安定化 (→{temp}℃)"
+            else: 
+                return temp, f"維持 ({temp}℃)"
+                
+    # 🌟 195分以降は「5℃設定」の降温プロセスとして処理（定常抽出対象外）
+    if elapsed_min >= 195:
+        return np.nan, "降温 (5℃設定)"
+        
     return np.nan, "終了"
 
 def auto_optimize_timeline(df):
@@ -150,7 +163,6 @@ def auto_optimize_timeline(df):
         stages = (df['Elapsed_min'] - offset).apply(lambda x: get_smart_stage(x)[0])
         df_temp = pd.DataFrame({'Temp': stages, 'CO': df['CO_Conc']}).dropna()
         
-        # 🌟 データが少ない実験でもエラーにならないよう柔軟に評価
         unique_stages = df_temp['Temp'].nunique()
         if unique_stages < 1: 
             continue
@@ -235,14 +247,11 @@ if file_ch1 and file_ch2:
             for col in ['CO2', 'CO', 'CH4', 'N2']:
                 if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            # 時間計算
+            # 🌟 Micro GCのバグ回避のため、時系列順（古い順）にソート
             df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
-            
-            # 🌟【重要】Micro GCの「最後のデータが一番上に来るバグ」を回避するため、必ず時系列順（古い順）に並び替える
             df = df.sort_values('Datetime').reset_index(drop=True)
             
             if df['Datetime'].isna().sum() < len(df) * 0.5:
-                # ソート済みの最も古い時間をスタート時間に設定
                 start_time = df['Datetime'].dropna().min()
                 df['Elapsed_min'] = (df['Datetime'] - start_time).dt.total_seconds() / 60.0
                 df['Elapsed_min'] = df['Elapsed_min'].interpolate(method='linear').fillna(pd.Series(range(len(df))) * 2.45)
@@ -259,7 +268,9 @@ if file_ch1 and file_ch2:
             df['Temperature'], df['Stage'] = [x[0] for x in stage_info], [x[1] for x in stage_info]
             
             df = pd.concat([df, df.apply(calc_metrics, axis=1)], axis=1)
-            df['Status'] = '❌ 昇温中・安定化待ち (除外)'
+            
+            # 🌟 グラフの凡例に「降温」を含めるように文言を修正
+            df['Status'] = '❌ 昇温・降温・安定化待ち (除外)'
             df.loc[df['Temperature'].notna(), 'Status'] = '⚠️ プラトー前半 (除外)'
             
             steady_indices = df.dropna(subset=['Temperature']).groupby('Temperature').tail(3).index
@@ -281,11 +292,12 @@ if file_ch1 and file_ch2:
         tab1, tab2 = st.tabs(["📈 グラフ分析", "📋 定常状態データ一覧"])
         with tab1:
             st.markdown("<br>", unsafe_allow_html=True)
+            # 🌟 グラフのカラースケールを新しいステータス名に対応
             chart = alt.Chart(df).mark_circle(size=80, opacity=0.9).encode(
                 x=alt.X('Furnace_Time_min:Q', title='電気炉稼働時間 (分)', axis=alt.Axis(grid=False)),
                 y=alt.Y('CO_Conc:Q', title='CO 濃度 (%)', axis=alt.Axis(gridColor='#f0f0f0')),
-                color=alt.Color('Status:N', title='データ判定', scale=alt.Scale(domain=['✅ 定常状態 (抽出対象)', '⚠️ プラトー前半 (除外)', '❌ 昇温中・安定化待ち (除外)'], range=['#10b981', '#f59e0b', '#ef4444'])),
-                tooltip=['Furnace_Time_min', 'Temperature', 'CO_Conc', 'CO2_Conversion(%)', 'Status']
+                color=alt.Color('Status:N', title='データ判定', scale=alt.Scale(domain=['✅ 定常状態 (抽出対象)', '⚠️ プラトー前半 (除外)', '❌ 昇温・降温・安定化待ち (除外)'], range=['#10b981', '#f59e0b', '#ef4444'])),
+                tooltip=['Furnace_Time_min', 'Temperature', 'Stage', 'CO_Conc', 'CO2_Conversion(%)', 'Status']
             ).properties(height=400).interactive()
             st.altair_chart(chart, use_container_width=True)
 
