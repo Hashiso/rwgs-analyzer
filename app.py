@@ -22,7 +22,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔐 1. 独自ユーザー認証 & マジックリンク自動ログイン
+# 🔐 1. 独自ユーザー認証 & パスワード変更機能
 # ==========================================
 USER_DB_FILE = "users.csv"
 JWT_SECRET = "ku_rwgs_secret_key_2026"
@@ -55,6 +55,21 @@ def login_user(username, password):
         return check_hashes(password, user_rows.iloc[0]["password_hash"])
     return False
 
+# 🌟 新規追加：パスワード再設定機能
+def update_password(username, old_password, new_password):
+    df = load_users()
+    user_idx = df.index[df['username'] == username].tolist()
+    if not user_idx:
+        return False, "ユーザーが存在しません。"
+    
+    idx = user_idx[0]
+    if check_hashes(old_password, df.at[idx, 'password_hash']):
+        df.at[idx, 'password_hash'] = make_hashes(new_password)
+        df.to_csv(USER_DB_FILE, index=False)
+        return True, "パスワードを更新しました。"
+    else:
+        return False, "現在のパスワードが間違っています。"
+
 def create_token(username):
     payload = {"username": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)}
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
@@ -82,9 +97,10 @@ if not st.session_state["authenticated"]:
 
 def login_screen():
     st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
-    st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer Login</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer</h2>", unsafe_allow_html=True)
     
-    tab_login, tab_register = st.tabs(["🔑 ログイン", "📝 新規アカウント作成"])
+    # 🌟 タブを3つに増やしました
+    tab_login, tab_register, tab_reset = st.tabs(["🔑 ログイン", "📝 新規登録", "🔄 パスワード変更"])
     
     with tab_login:
         login_user_input = st.text_input("ユーザー名", key="login_user")
@@ -113,6 +129,26 @@ def login_screen():
                     st.success("アカウントを作成しました！「ログイン」タブからログインしてください。")
                 else:
                     st.error("このユーザー名はすでに使われています。")
+                    
+    # 🌟 パスワード変更UI
+    with tab_reset:
+        reset_user_input = st.text_input("ユーザー名", key="reset_user")
+        reset_old_pass = st.text_input("現在のパスワード", type="password", key="reset_old_pass")
+        reset_new_pass = st.text_input("新しいパスワード", type="password", key="reset_new_pass")
+        reset_new_pass_conf = st.text_input("新しいパスワード（確認）", type="password", key="reset_new_pass_conf")
+        
+        if st.button("パスワードを変更", use_container_width=True):
+            if not reset_user_input or not reset_old_pass or not reset_new_pass:
+                st.error("すべての項目を入力してください。")
+            elif reset_new_pass != reset_new_pass_conf:
+                st.error("新しいパスワードが一致しません。")
+            else:
+                success, msg = update_password(reset_user_input, reset_old_pass, reset_new_pass)
+                if success:
+                    st.success(msg + " 「ログイン」タブから新しいパスワードでログインしてください。")
+                else:
+                    st.error(msg)
+                    
     st.markdown("</div>", unsafe_allow_html=True)
 
 def logout():
@@ -200,7 +236,6 @@ with st.sidebar:
     
     USER_CALIB_FILE = f"calib_settings_{current_user}.csv"
     
-    # 🌟 BTMO_resultから逆算した「真の係数」をデフォルトに設定
     DEFAULT_CALIB = pd.DataFrame({
         'Gas': ['CO2', 'CO', 'CH4'],
         'Slope': [4.75e-07, 1.44e-06, 1.66e-05],
@@ -212,20 +247,15 @@ with st.sidebar:
     else:
         user_calib_df = DEFAULT_CALIB.copy()
     
+    # 🌟 指数表記の設定（修正済み）
     edited_calib_df = st.data_editor(
         user_calib_df, 
         num_rows="dynamic", 
         hide_index=True, 
         use_container_width=True,
         column_config={
-            "Slope": st.column_config.NumberColumn(
-                "Slope",
-                format="%.3e"  # 指数表記（例: 4.750e-07）で表示
-            ),
-            "Intercept": st.column_config.NumberColumn(
-                "Intercept",
-                format="%.4f"  # 小数第4位まで表示
-            )
+            "Slope": st.column_config.NumberColumn("Slope", format="%.3e"),
+            "Intercept": st.column_config.NumberColumn("Intercept", format="%.4f")
         }
     )
     calib_dict = edited_calib_df.set_index('Gas').to_dict(orient='index')
@@ -282,12 +312,11 @@ if file_ch1 and file_ch2:
 
             final_result = df.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
             
-            # 🌟 C-Balanceの正しい計算 (100℃の時の総炭素量を基準=100%とする)
             if not final_result.empty and 100 in final_result['Temperature'].values:
                 baseline_c = final_result.loc[final_result['Temperature'] == 100, 'Total_Carbon_Conc(%)'].values[0]
                 final_result['C-Balance(%)'] = final_result['Total_Carbon_Conc(%)'] / baseline_c * 100
             else:
-                final_result['C-Balance(%)'] = 100.0 # 基準がない場合は便宜上100%
+                final_result['C-Balance(%)'] = 100.0
                 
             final_result = final_result[['Temperature', 'C-Balance(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']]
 
