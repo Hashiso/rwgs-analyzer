@@ -129,29 +129,23 @@ if not st.session_state["authenticated"]:
 current_user = st.session_state["username"]
 
 # ==========================================
-# 分析ロジック群（数理統計アルゴリズム）
+# 分析ロジック群
 # ==========================================
 def get_smart_stage(elapsed_min):
     if pd.isna(elapsed_min) or elapsed_min < 0: return np.nan, "待機"
-    
-    # 🌟 195分で600℃完了までのスケジュール
     schedule = [
         (0, 20, 100), (20, 40, 200), (40, 60, 300), (60, 80, 350), 
         (80, 103, 400), (103, 126, 450), (126, 149, 500), 
         (149, 172, 550), (172, 195, 600)
     ]
-    
     for start, end, temp in schedule:
         if start <= elapsed_min < end:
             if elapsed_min < start + 8: 
                 return np.nan, f"昇温/安定化 (→{temp}℃)"
             else: 
                 return temp, f"維持 ({temp}℃)"
-                
-    # 🌟 195分以降は「5℃設定」の降温プロセスとして処理（定常抽出対象外）
     if elapsed_min >= 195:
         return np.nan, "降温 (5℃設定)"
-        
     return np.nan, "終了"
 
 def auto_optimize_timeline(df):
@@ -162,30 +156,25 @@ def auto_optimize_timeline(df):
     for offset in np.arange(0, 40, 0.5):
         stages = (df['Elapsed_min'] - offset).apply(lambda x: get_smart_stage(x)[0])
         df_temp = pd.DataFrame({'Temp': stages, 'CO': df['CO_Conc']}).dropna()
-        
-        unique_stages = df_temp['Temp'].nunique()
-        if unique_stages < 1: 
-            continue
+        if df_temp['Temp'].nunique() < 1: continue
             
         std_sum = df_temp.groupby('Temp')['CO'].std().fillna(0).sum()
         means = df_temp.groupby('Temp')['CO'].mean()
         max_temp_in_data = means.index.max()
-        
         penalty = 10000 if (not means.empty and means.idxmax() != max_temp_in_data) else 0
         
-        score = std_sum / unique_stages + penalty
+        score = std_sum / df_temp['Temp'].nunique() + penalty
         if score < min_score: 
             min_score, best_offset = score, offset
-            
     return best_offset, gc_interval
 
 def calc_metrics(row):
     co_conc, ch4_conc, co2_conc = row.get('CO_Conc', 0), row.get('CH4_Conc', 0), row.get('CO2_Conc', 0)
-    total_c = co2_conc + co_conc + ch4_conc
-    conversion = (co_conc + ch4_conc) / total_c * 100 if total_c > 0 else 0
+    total_c_conc = co2_conc + co_conc + ch4_conc
+    conversion = (co_conc + ch4_conc) / total_c_conc * 100 if total_c_conc > 0 else 0
     prod_c = co_conc + ch4_conc
-    return pd.Series([total_c, conversion, co_conc / prod_c * 100 if prod_c > 0 else 0, ch4_conc / prod_c * 100 if prod_c > 0 else 0], 
-                     index=['Total_Carbon(%)', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)'])
+    return pd.Series([total_c_conc, conversion, co_conc / prod_c * 100 if prod_c > 0 else 0, ch4_conc / prod_c * 100 if prod_c > 0 else 0], 
+                     index=['Total_Carbon_Conc(%)', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)'])
 
 # ==========================================
 # 📊 UI 構築
@@ -200,7 +189,7 @@ with st.sidebar:
     magic_url = f"https://rwgs-analyzer.streamlit.app/?auth={user_token}"
     
     with st.expander("🔗 次回から自動ログインする"):
-        st.caption("以下のURLをブラウザの「ブックマーク（お気に入り）」に登録してください。次回からパスワード入力なしで直接この解析画面が開きます。")
+        st.caption("以下のURLをブラウザの「ブックマーク（お気に入り）」に登録してください。")
         st.code(magic_url, language="text")
         
     if st.button("ログアウト", use_container_width=True):
@@ -210,10 +199,12 @@ with st.sidebar:
     st.markdown("### ⚙️ あなたのキャリブレーション設定")
     
     USER_CALIB_FILE = f"calib_settings_{current_user}.csv"
+    
+    # 🌟 BTMO_resultから逆算した「真の係数」をデフォルトに設定
     DEFAULT_CALIB = pd.DataFrame({
         'Gas': ['CO2', 'CO', 'CH4'],
-        'Slope': [6.473e-07, 1.843e-06, 1.000e-06],
-        'Intercept': [-0.0387, 0.1918, 0.0]
+        'Slope': [4.75e-07, 1.44e-06, 1.66e-05],
+        'Intercept': [0.0, 0.0, 0.0]
     })
     
     if os.path.exists(USER_CALIB_FILE):
@@ -226,7 +217,7 @@ with st.sidebar:
     
     if st.button("💾 この係数を自分の設定として保存"):
         edited_calib_df.to_csv(USER_CALIB_FILE, index=False)
-        st.success(f"保存しました！次回ログイン時も自動でこの係数が読み込まれます。")
+        st.success(f"保存しました！")
 
 st.markdown("#### 📂 1. Upload Raw Data")
 col1, col2 = st.columns(2)
@@ -236,7 +227,7 @@ with col2: file_ch2 = st.file_uploader("Channel 2 (.Area)", type=['Area', 'txt',
 if file_ch1 and file_ch2:
     st.markdown("#### 🚀 2. Execute Analysis")
     if st.button("全自動で解析を実行", type="primary", use_container_width=True):
-        with st.spinner("タイムラインの同期および定常状態の抽出を実行中..."):
+        with st.spinner("データを処理しています..."):
             
             df_ch1 = pd.read_csv(file_ch1, sep='\t', skiprows=2, encoding='shift_jis')
             df_ch2 = pd.read_csv(file_ch2, sep='\t', skiprows=2, encoding='shift_jis')
@@ -247,7 +238,6 @@ if file_ch1 and file_ch2:
             for col in ['CO2', 'CO', 'CH4', 'N2']:
                 if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-            # 🌟 Micro GCのバグ回避のため、時系列順（古い順）にソート
             df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
             df = df.sort_values('Datetime').reset_index(drop=True)
             
@@ -269,7 +259,6 @@ if file_ch1 and file_ch2:
             
             df = pd.concat([df, df.apply(calc_metrics, axis=1)], axis=1)
             
-            # 🌟 グラフの凡例に「降温」を含めるように文言を修正
             df['Status'] = '❌ 昇温・降温・安定化待ち (除外)'
             df.loc[df['Temperature'].notna(), 'Status'] = '⚠️ プラトー前半 (除外)'
             
@@ -277,22 +266,29 @@ if file_ch1 and file_ch2:
             df.loc[steady_indices, 'Status'] = '✅ 定常状態 (抽出対象)'
 
             final_result = df.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
-            final_result = final_result[['Temperature', 'Total_Carbon(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']]
+            
+            # 🌟 C-Balanceの正しい計算 (100℃の時の総炭素量を基準=100%とする)
+            if not final_result.empty and 100 in final_result['Temperature'].values:
+                baseline_c = final_result.loc[final_result['Temperature'] == 100, 'Total_Carbon_Conc(%)'].values[0]
+                final_result['C-Balance(%)'] = final_result['Total_Carbon_Conc(%)'] / baseline_c * 100
+            else:
+                final_result['C-Balance(%)'] = 100.0 # 基準がない場合は便宜上100%
+                
+            final_result = final_result[['Temperature', 'C-Balance(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']]
 
         st.markdown("---")
-        st.success(f"🎯 **タイムライン自動補正 完了:** \nデータ構造を解析し、**測定開始から約 {best_offset:.1f} 分の遅れ** を自動検知してスケジュールを同期しました。")
+        st.success(f"🎯 **解析完了:** \n測定開始から約 {best_offset:.1f} 分の遅れを自動検知してスケジュールを同期しました。")
 
         if not final_result.empty:
             max_temp = final_result['Temperature'].max()
             m1, m2, m3 = st.columns(3)
             m1.metric(label=f"最大転化率 (@{int(max_temp)}℃)", value=f"{final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
             m2.metric(label="検出されたGC測定間隔", value=f"{gc_interval:.2f} min")
-            m3.metric(label="平均炭素バランス (C-Balance)", value=f"{final_result['Total_Carbon(%)'].mean():.2f} %")
+            m3.metric(label="平均炭素バランス (C-Balance)", value=f"{final_result['C-Balance(%)'].mean():.2f} %")
 
         tab1, tab2 = st.tabs(["📈 グラフ分析", "📋 定常状態データ一覧"])
         with tab1:
             st.markdown("<br>", unsafe_allow_html=True)
-            # 🌟 グラフのカラースケールを新しいステータス名に対応
             chart = alt.Chart(df).mark_circle(size=80, opacity=0.9).encode(
                 x=alt.X('Furnace_Time_min:Q', title='電気炉稼働時間 (分)', axis=alt.Axis(grid=False)),
                 y=alt.Y('CO_Conc:Q', title='CO 濃度 (%)', axis=alt.Axis(gridColor='#f0f0f0')),
