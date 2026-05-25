@@ -212,7 +212,22 @@ with st.sidebar:
     else:
         user_calib_df = DEFAULT_CALIB.copy()
     
-    edited_calib_df = st.data_editor(user_calib_df, num_rows="dynamic", hide_index=True, use_container_width=True)
+    edited_calib_df = st.data_editor(
+        user_calib_df, 
+        num_rows="dynamic", 
+        hide_index=True, 
+        use_container_width=True,
+        column_config={
+            "Slope": st.column_config.NumberColumn(
+                "Slope",
+                format="%.3e"  # 指数表記（例: 4.750e-07）で表示
+            ),
+            "Intercept": st.column_config.NumberColumn(
+                "Intercept",
+                format="%.4f"  # 小数第4位まで表示
+            )
+        }
+    )
     calib_dict = edited_calib_df.set_index('Gas').to_dict(orient='index')
     
     if st.button("💾 この係数を自分の設定として保存"):
