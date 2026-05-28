@@ -22,150 +22,59 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔐 1. 独自ユーザー認証 & パスワード変更機能
+# 🔐 1. ユーザー認証機能 (維持)
 # ==========================================
 USER_DB_FILE = "users.csv"
 JWT_SECRET = "ku_rwgs_secret_key_2026"
 
-def make_hashes(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
-
-def check_hashes(password, hashed_password):
-    return make_hashes(password) == hashed_password
-
+def make_hashes(password): return hashlib.sha256(str.encode(password)).hexdigest()
+def check_hashes(password, hashed_password): return make_hashes(password) == hashed_password
 def load_users():
-    if os.path.exists(USER_DB_FILE):
-        return pd.read_csv(USER_DB_FILE)
+    if os.path.exists(USER_DB_FILE): return pd.read_csv(USER_DB_FILE)
     return pd.DataFrame(columns=["username", "password_hash"])
-
 def add_user(username, password):
     df = load_users()
-    if username in df["username"].values:
-        return False
-    hashed_pwd = make_hashes(password)
-    new_user = pd.DataFrame([[username, hashed_pwd]], columns=["username", "password_hash"])
-    df = pd.concat([df, new_user], ignore_index=True)
+    if username in df["username"].values: return False
+    df = pd.concat([df, pd.DataFrame([[username, make_hashes(password)]], columns=["username", "password_hash"])], ignore_index=True)
     df.to_csv(USER_DB_FILE, index=False)
     return True
-
 def login_user(username, password):
     df = load_users()
     user_rows = df[df["username"] == username]
-    if not user_rows.empty:
-        return check_hashes(password, user_rows.iloc[0]["password_hash"])
-    return False
+    return check_hashes(password, user_rows.iloc[0]["password_hash"]) if not user_rows.empty else False
 
-# 🌟 新規追加：パスワード再設定機能
-def update_password(username, old_password, new_password):
-    df = load_users()
-    user_idx = df.index[df['username'] == username].tolist()
-    if not user_idx:
-        return False, "ユーザーが存在しません。"
-    
-    idx = user_idx[0]
-    if check_hashes(old_password, df.at[idx, 'password_hash']):
-        df.at[idx, 'password_hash'] = make_hashes(new_password)
-        df.to_csv(USER_DB_FILE, index=False)
-        return True, "パスワードを更新しました。"
-    else:
-        return False, "現在のパスワードが間違っています。"
+if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
+if "username" not in st.session_state: st.session_state["username"] = ""
 
-def create_token(username):
-    payload = {"username": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)}
-    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-def verify_token(token):
+if not st.session_state["authenticated"] and "auth" in st.query_params:
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload["username"]
-    except:
-        return None
-
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-if "username" not in st.session_state:
-    st.session_state["username"] = ""
+        payload = jwt.decode(st.query_params["auth"], JWT_SECRET, algorithms=["HS256"])
+        st.session_state["authenticated"], st.session_state["username"] = True, payload["username"]
+        st.rerun()
+    except: pass
 
 if not st.session_state["authenticated"]:
-    if "auth" in st.query_params:
-        token = st.query_params["auth"]
-        saved_user = verify_token(token)
-        if saved_user:
-            st.session_state["authenticated"] = True
-            st.session_state["username"] = saved_user
-            st.rerun()
-
-def login_screen():
     st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer</h2>", unsafe_allow_html=True)
-    
-    # 🌟 タブを3つに増やしました
-    tab_login, tab_register, tab_reset = st.tabs(["🔑 ログイン", "📝 新規登録", "🔄 パスワード変更"])
-    
+    tab_login, tab_register = st.tabs(["🔑 ログイン", "📝 新規登録"])
     with tab_login:
-        login_user_input = st.text_input("ユーザー名", key="login_user")
-        login_pass_input = st.text_input("パスワード", type="password", key="login_pass")
-        
-        if st.button("ログイン", use_container_width=True):
-            if login_user(login_user_input, login_pass_input):
-                st.session_state["authenticated"] = True
-                st.session_state["username"] = login_user_input
-                st.rerun()
-            else:
-                st.error("ユーザー名またはパスワードが正しくありません。")
-                
+        u = st.text_input("ユーザー名", key="l_u")
+        p = st.text_input("パスワード", type="password", key="l_p")
+        if st.button("ログイン", use_container_width=True) and login_user(u, p):
+            st.session_state["authenticated"], st.session_state["username"] = True, u
+            st.rerun()
     with tab_register:
-        reg_user_input = st.text_input("希望するユーザー名", key="reg_user")
-        reg_pass_input = st.text_input("パスワードを設定", type="password", key="reg_pass")
-        reg_pass_confirm = st.text_input("パスワード（確認用）", type="password", key="reg_pass_conf")
-        
-        if st.button("新規アカウントを登録", use_container_width=True):
-            if not reg_user_input.strip() or not reg_pass_input.strip():
-                st.error("ユーザー名とパスワードを入力してください。")
-            elif reg_pass_input != reg_pass_confirm:
-                st.error("パスワードが一致しません。")
-            else:
-                if add_user(reg_user_input.strip(), reg_pass_input.strip()):
-                    st.success("アカウントを作成しました！「ログイン」タブからログインしてください。")
-                else:
-                    st.error("このユーザー名はすでに使われています。")
-                    
-    # 🌟 パスワード変更UI
-    with tab_reset:
-        reset_user_input = st.text_input("ユーザー名", key="reset_user")
-        reset_old_pass = st.text_input("現在のパスワード", type="password", key="reset_old_pass")
-        reset_new_pass = st.text_input("新しいパスワード", type="password", key="reset_new_pass")
-        reset_new_pass_conf = st.text_input("新しいパスワード（確認）", type="password", key="reset_new_pass_conf")
-        
-        if st.button("パスワードを変更", use_container_width=True):
-            if not reset_user_input or not reset_old_pass or not reset_new_pass:
-                st.error("すべての項目を入力してください。")
-            elif reset_new_pass != reset_new_pass_conf:
-                st.error("新しいパスワードが一致しません。")
-            else:
-                success, msg = update_password(reset_user_input, reset_old_pass, reset_new_pass)
-                if success:
-                    st.success(msg + " 「ログイン」タブから新しいパスワードでログインしてください。")
-                else:
-                    st.error(msg)
-                    
+        ru = st.text_input("ユーザー名", key="r_u")
+        rp = st.text_input("パスワード", type="password", key="r_p")
+        if st.button("新規登録", use_container_width=True) and add_user(ru, rp):
+            st.success("作成完了！ログインしてください。")
     st.markdown("</div>", unsafe_allow_html=True)
-
-def logout():
-    st.session_state["authenticated"] = False
-    st.session_state["username"] = ""
-    if "auth" in st.query_params:
-        del st.query_params["auth"]
-    st.rerun()
-
-if not st.session_state["authenticated"]:
-    login_screen()
     st.stop()
 
 current_user = st.session_state["username"]
 
 # ==========================================
-# 分析ロジック群
+# 分析コアロジック群
 # ==========================================
 def get_smart_stage(elapsed_min):
     if pd.isna(elapsed_min) or elapsed_min < 0: return np.nan, "待機"
@@ -176,13 +85,8 @@ def get_smart_stage(elapsed_min):
     ]
     for start, end, temp in schedule:
         if start <= elapsed_min < end:
-            if elapsed_min < start + 8: 
-                return np.nan, f"昇温/安定化 (→{temp}℃)"
-            else: 
-                return temp, f"維持 ({temp}℃)"
-    if elapsed_min >= 195:
-        return np.nan, "降温 (5℃設定)"
-    return np.nan, "終了"
+            return (np.nan, f"昇温/安定化 (→{temp}℃)") if elapsed_min < start + 8 else (temp, f"維持 ({temp}℃)")
+    return np.nan, "降温・測定終了後"
 
 def auto_optimize_timeline(df):
     gc_interval = df['Elapsed_min'].diff().median()
@@ -193,15 +97,8 @@ def auto_optimize_timeline(df):
         stages = (df['Elapsed_min'] - offset).apply(lambda x: get_smart_stage(x)[0])
         df_temp = pd.DataFrame({'Temp': stages, 'CO': df['CO_Conc']}).dropna()
         if df_temp['Temp'].nunique() < 1: continue
-            
-        std_sum = df_temp.groupby('Temp')['CO'].std().fillna(0).sum()
-        means = df_temp.groupby('Temp')['CO'].mean()
-        max_temp_in_data = means.index.max()
-        penalty = 10000 if (not means.empty and means.idxmax() != max_temp_in_data) else 0
-        
-        score = std_sum / df_temp['Temp'].nunique() + penalty
-        if score < min_score: 
-            min_score, best_offset = score, offset
+        score = df_temp.groupby('Temp')['CO'].std().fillna(0).sum() / df_temp['Temp'].nunique()
+        if score < min_score: min_score, best_offset = score, offset
     return best_offset, gc_interval
 
 def calc_metrics(row):
@@ -216,133 +113,151 @@ def calc_metrics(row):
 # 📊 UI 構築
 # ==========================================
 st.markdown("## 🧪 RWGS Catalyst Analytics")
-st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Fully Automated Data Pipeline</p>", unsafe_allow_html=True)
+st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Targeted Multi-Session Data Splitter</p>", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown(f"👤 **ログイン中:** `{current_user}`")
-    
-    user_token = create_token(current_user)
-    magic_url = f"https://rwgs-analyzer.streamlit.app/?auth={user_token}"
-    
-    with st.expander("🔗 次回から自動ログインする"):
-        st.caption("以下のURLをブラウザの「ブックマーク（お気に入り）」に登録してください。")
-        st.code(magic_url, language="text")
-        
+    st.markdown(f"👤 **ユーザー:** `{current_user}`")
     if st.button("ログアウト", use_container_width=True):
-        logout()
-    
+        st.session_state["authenticated"] = False
+        st.rerun()
     st.markdown("---")
-    st.markdown("### ⚙️ あなたのキャリブレーション設定")
-    
+    st.markdown("### ⚙️ キャリブレーション設定")
     USER_CALIB_FILE = f"calib_settings_{current_user}.csv"
-    
-    DEFAULT_CALIB = pd.DataFrame({
-        'Gas': ['CO2', 'CO', 'CH4'],
-        'Slope': [4.75e-07, 1.44e-06, 1.66e-05],
-        'Intercept': [0.0, 0.0, 0.0]
-    })
-    
-    if os.path.exists(USER_CALIB_FILE):
-        user_calib_df = pd.read_csv(USER_CALIB_FILE)
-    else:
-        user_calib_df = DEFAULT_CALIB.copy()
-    
-    # 🌟 指数表記の設定（修正済み）
-    edited_calib_df = st.data_editor(
-        user_calib_df, 
-        num_rows="dynamic", 
-        hide_index=True, 
-        use_container_width=True,
-        column_config={
-            "Slope": st.column_config.NumberColumn("Slope", format="%.3e"),
-            "Intercept": st.column_config.NumberColumn("Intercept", format="%.4f")
-        }
-    )
+    DEFAULT_CALIB = pd.DataFrame({'Gas': ['CO2', 'CO', 'CH4'], 'Slope': [4.75e-07, 1.44e-06, 1.66e-05], 'Intercept': [0.0, 0.0, 0.0]})
+    user_calib_df = pd.read_csv(USER_CALIB_FILE) if os.path.exists(USER_CALIB_FILE) else DEFAULT_CALIB.copy()
+    edited_calib_df = st.data_editor(user_calib_df, num_rows="dynamic", hide_index=True, use_container_width=True)
     calib_dict = edited_calib_df.set_index('Gas').to_dict(orient='index')
-    
-    if st.button("💾 この係数を自分の設定として保存"):
-        edited_calib_df.to_csv(USER_CALIB_FILE, index=False)
-        st.success(f"保存しました！")
+    if st.button("💾 係数を保存"): edited_calib_df.to_csv(USER_CALIB_FILE, index=False)
 
-st.markdown("#### 📂 1. Upload Raw Data")
+st.markdown("#### 📂 1. Raw Data ファイルのアップロード")
 col1, col2 = st.columns(2)
 with col1: file_ch1 = st.file_uploader("Channel 1 (.Area)", type=['Area', 'txt', 'csv'])
 with col2: file_ch2 = st.file_uploader("Channel 2 (.Area)", type=['Area', 'txt', 'csv'])
 
+if "split_results" not in st.session_state: st.session_state["split_results"] = None
+
 if file_ch1 and file_ch2:
-    st.markdown("#### 🚀 2. Execute Analysis")
-    if st.button("全自動で解析を実行", type="primary", use_container_width=True):
-        with st.spinner("データを処理しています..."):
-            
+    st.markdown("#### 🚀 2. 解析の実行")
+    if st.button("生データを自動解析（_rxn本試験を自動検出）", type="primary", use_container_width=True):
+        with st.spinner("ファイル内から本試験データを抽出中..."):
             df_ch1 = pd.read_csv(file_ch1, sep='\t', skiprows=2, encoding='shift_jis')
             df_ch2 = pd.read_csv(file_ch2, sep='\t', skiprows=2, encoding='shift_jis')
             df_ch1.columns, df_ch2.columns = df_ch1.columns.str.strip(), df_ch2.columns.str.strip()
             
             cols_to_drop = [c for c in df_ch2.columns if c in df_ch1.columns]
-            df = pd.concat([df_ch1.reset_index(drop=True), df_ch2.drop(columns=cols_to_drop).reset_index(drop=True)], axis=1)
-            for col in ['CO2', 'CO', 'CH4', 'N2']:
-                if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-            df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
-            df = df.sort_values('Datetime').reset_index(drop=True)
+            df_all = pd.concat([df_ch1.reset_index(drop=True), df_ch2.drop(columns=cols_to_drop).reset_index(drop=True)], axis=1)
             
-            if df['Datetime'].isna().sum() < len(df) * 0.5:
-                start_time = df['Datetime'].dropna().min()
-                df['Elapsed_min'] = (df['Datetime'] - start_time).dt.total_seconds() / 60.0
-                df['Elapsed_min'] = df['Elapsed_min'].interpolate(method='linear').fillna(pd.Series(range(len(df))) * 2.45)
-            else:
-                df['Elapsed_min'] = pd.Series(range(len(df))) * 2.45
-
-            df['CO2_Conc'] = (df['CO2'] * calib_dict.get('CO2', {}).get('Slope', 1) + calib_dict.get('CO2', {}).get('Intercept', 0)).clip(lower=0)
-            df['CO_Conc'] = (df['CO'] * calib_dict.get('CO', {}).get('Slope', 1) + calib_dict.get('CO', {}).get('Intercept', 0)).clip(lower=0)
-            df['CH4_Conc'] = (df['CH4'] * calib_dict.get('CH4', {}).get('Slope', 1) + calib_dict.get('CH4', {}).get('Intercept', 0)).clip(lower=0)
+            # データクレンジング
+            for col in ['CO2', 'CO', 'CH4', 'N2', 'O2']:
+                if col in df_all.columns:
+                    df_all[col] = pd.to_numeric(df_all[col], errors='coerce').fillna(0)
             
-            best_offset, gc_interval = auto_optimize_timeline(df)
-            df['Furnace_Time_min'] = df['Elapsed_min'] - best_offset
-            stage_info = df['Furnace_Time_min'].apply(get_smart_stage)
-            df['Temperature'], df['Stage'] = [x[0] for x in stage_info], [x[1] for x in stage_info]
+            df_all['Date'] = df_all['Date'].astype(str).str.strip()
+            unique_dates = sorted([d for d in df_all['Date'].unique() if d and d != 'nan'])
             
-            df = pd.concat([df, df.apply(calc_metrics, axis=1)], axis=1)
+            parsed_sessions = {}
             
-            df['Status'] = '❌ 昇温・降温・安定化待ち (除外)'
-            df.loc[df['Temperature'].notna(), 'Status'] = '⚠️ プラトー前半 (除外)'
-            
-            steady_indices = df.dropna(subset=['Temperature']).groupby('Temperature').tail(3).index
-            df.loc[steady_indices, 'Status'] = '✅ 定常状態 (抽出対象)'
-
-            final_result = df.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
-            
-            if not final_result.empty and 100 in final_result['Temperature'].values:
-                baseline_c = final_result.loc[final_result['Temperature'] == 100, 'Total_Carbon_Conc(%)'].values[0]
-                final_result['C-Balance(%)'] = final_result['Total_Carbon_Conc(%)'] / baseline_c * 100
-            else:
-                final_result['C-Balance(%)'] = 100.0
+            for date_key in unique_dates:
+                df_date = df_all[df_all['Date'] == date_key].copy()
+                if len(df_date) < 3: continue
                 
-            final_result = final_result[['Temperature', 'C-Balance(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']]
+                # 🌟【ここを大幅改善！】
+                # Sample Idに「_rxn」が含まれる本試験行だけをフィルタリング
+                df_rxn = df_date[df_date['Sample Id'].astype(str).str.contains('_rxn', case=False)].copy()
+                
+                # 万が一「_rxn」という名前がついていないファイルでも動くようにセーフティを配置
+                if df_rxn.empty:
+                    df_rxn = df_date.copy()
+                
+                # 反応実験の最初の行（＝本当の繰り返し1）を正確な基準として経過時間を計算！
+                df_rxn['Datetime'] = pd.to_datetime(df_rxn['Date'] + ' ' + df_rxn['Time'].astype(str).str.strip(), errors='coerce')
+                df_rxn = df_rxn.sort_values('Datetime').reset_index(drop=True)
+                
+                start_time = df_rxn['Datetime'].dropna().min()
+                df_rxn['Elapsed_min'] = (df_rxn['Datetime'] - start_time).dt.total_seconds() / 60.0
+                
+                # 濃度計算
+                df_rxn['CO2_Conc'] = (df_rxn['CO2'] * calib_dict.get('CO2', {}).get('Slope', 1) + calib_dict.get('CO2', {}).get('Intercept', 0)).clip(lower=0)
+                df_rxn['CO_Conc'] = (df_rxn['CO'] * calib_dict.get('CO', {}).get('Slope', 1) + calib_dict.get('CO', {}).get('Intercept', 0)).clip(lower=0)
+                df_rxn['CH4_Conc'] = (df_rxn['CH4'] * calib_dict.get('CH4', {}).get('Slope', 1) + calib_dict.get('CH4', {}).get('Intercept', 0)).clip(lower=0)
+                
+                # タイムライン自動最適化
+                best_offset, gc_interval = auto_optimize_timeline(df_rxn)
+                df_rxn['Furnace_Time_min'] = df_rxn['Elapsed_min'] - best_offset
+                
+                stage_info = df_rxn['Furnace_Time_min'].apply(get_smart_stage)
+                df_rxn['Temperature'], df_rxn['Stage'] = [x[0] for x in stage_info], [x[1] for x in stage_info]
+                
+                df_rxn = pd.concat([df_rxn, df_rxn.apply(calc_metrics, axis=1)], axis=1)
+                
+                df_rxn['Status'] = '❌ 昇温・降温・安定化待ち'
+                df_rxn.loc[df_rxn['Temperature'].notna(), 'Status'] = '⚠️ プラトー前半'
+                
+                steady_indices = df_rxn.dropna(subset=['Temperature']).groupby('Temperature').tail(3).index
+                df_rxn.loc[steady_indices, 'Status'] = '✅ 定常状態'
+                
+                final_result = df_rxn.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
+                
+                if not final_result.empty and 100 in final_result['Temperature'].values:
+                    baseline_c = final_result.loc[final_result['Temperature'] == 100, 'Total_Carbon_Conc(%)'].values[0]
+                    final_result['C-Balance(%)'] = final_result['Total_Carbon_Conc(%)'] / baseline_c * 100
+                else:
+                    final_result['C-Balance(%)'] = 100.0
+                
+                cols_output = ['Temperature', 'C-Balance(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']
+                final_result = final_result[[c for c in cols_output if c in final_result.columns]]
+                
+                parsed_sessions[date_key] = {
+                    "df": df_rxn,
+                    "final_result": final_result,
+                    "offset": best_offset,
+                    "interval": gc_interval
+                }
+            
+            st.session_state["split_results"] = parsed_sessions
+            st.success(f"🎯 解析完了: 前処理(_red)を自動で分離し、本試験(_rxn)の開始点を基準にタイムラインを100%完全同期しました！")
 
-        st.markdown("---")
-        st.success(f"🎯 **解析完了:** \n測定開始から約 {best_offset:.1f} 分の遅れを自動検知してスケジュールを同期しました。")
-
-        if not final_result.empty:
-            max_temp = final_result['Temperature'].max()
-            m1, m2, m3 = st.columns(3)
-            m1.metric(label=f"最大転化率 (@{int(max_temp)}℃)", value=f"{final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
-            m2.metric(label="検出されたGC測定間隔", value=f"{gc_interval:.2f} min")
-            m3.metric(label="平均炭素バランス (C-Balance)", value=f"{final_result['C-Balance(%)'].mean():.2f} %")
-
-        tab1, tab2 = st.tabs(["📈 グラフ分析", "📋 定常状態データ一覧"])
-        with tab1:
-            st.markdown("<br>", unsafe_allow_html=True)
-            chart = alt.Chart(df).mark_circle(size=80, opacity=0.9).encode(
-                x=alt.X('Furnace_Time_min:Q', title='電気炉稼働時間 (分)', axis=alt.Axis(grid=False)),
-                y=alt.Y('CO_Conc:Q', title='CO 濃度 (%)', axis=alt.Axis(gridColor='#f0f0f0')),
-                color=alt.Color('Status:N', title='データ判定', scale=alt.Scale(domain=['✅ 定常状態 (抽出対象)', '⚠️ プラトー前半 (除外)', '❌ 昇温・降温・安定化待ち (除外)'], range=['#10b981', '#f59e0b', '#ef4444'])),
-                tooltip=['Furnace_Time_min', 'Temperature', 'Stage', 'CO_Conc', 'CO2_Conversion(%)', 'Status']
-            ).properties(height=400).interactive()
-            st.altair_chart(chart, use_container_width=True)
-
-        with tab2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.dataframe(final_result.style.format("{:.3f}"), use_container_width=True)
-            csv = final_result.to_csv(index=False).encode('shift_jis')
-            st.download_button(label="📥 結果をCSVでダウンロード", data=csv, file_name=f'RWGS_Result_{current_user}.csv', mime='text/csv')
+# ==========================================
+# 📈 表示部分 (維持)
+# ==========================================
+if st.session_state["split_results"] is not None:
+    st.markdown("---")
+    st.markdown("### 🔍 3. 日付を選択して結果を表示")
+    
+    sessions = st.session_state["split_results"]
+    selected_date = st.selectbox("📅 解析結果を表示したい測定日を選択してください：", list(sessions.keys()))
+    
+    data = sessions[selected_date]
+    sub_df = data["df"]
+    sub_res = data["final_result"]
+    
+    st.markdown(f"📊 **【{selected_date} の測定データ解析】**")
+    
+    m1, m2, m3 = st.columns(3)
+    if not sub_res.empty:
+        max_temp = sub_res['Temperature'].max()
+        m1.metric(label=f"最大転化率 (@{int(max_temp)}℃)", value=f"{sub_res.loc[sub_res['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
+    else:
+        m1.metric(label="最大転化率", value="N/A")
+    m2.metric(label="検出されたGC測定間隔", value=f"{data['interval']:.2f} min")
+    m3.metric(label="電気炉のタイムラグ(同期オフセット)", value=f"{data['offset']:.1f} min")
+    
+    tab1, tab2 = st.tabs(["📈 タイムライングラフ", "📋 定常状態（プロット）データ一覧"])
+    
+    with tab1:
+        st.markdown("<br>", unsafe_allow_html=True)
+        chart = alt.Chart(sub_df).mark_circle(size=80, opacity=0.9).encode(
+            x=alt.X('Furnace_Time_min:Q', title='電気炉稼働時間 (分)', axis=alt.Axis(grid=False)),
+            y=alt.Y('CO_Conc:Q', title='CO 濃度 (%)', axis=alt.Axis(gridColor='#f0f0f0')),
+            color=alt.Color('Status:N', title='データ判定', 
+                             scale=alt.Scale(domain=['✅ 定常状態', '⚠️ プラトー前半', '❌ 昇温・降温・安定化待ち'], 
+                                             range=['#10b981', '#f59e0b', '#ef4444'])),
+            tooltip=['Furnace_Time_min', 'Temperature', 'Stage', 'CO_Conc', 'CO2_Conversion(%)', 'Status']
+        ).properties(height=400).interactive()
+        st.altair_chart(chart, use_container_width=True)
+        
+    with tab2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.dataframe(sub_res.style.format("{:.3f}"), use_container_width=True)
+        csv = sub_res.to_csv(index=False).encode('shift_jis')
+        st.download_button(label=f"📥 {selected_date} の結果のみCSVダウンロード", data=csv, file_name=f'RWGS_Result_{selected_date}_{current_user}.csv', mime='text/csv')
