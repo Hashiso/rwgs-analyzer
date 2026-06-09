@@ -57,25 +57,13 @@ def update_password(username, old_password, new_password):
         return True, "パスワードを更新しました。"
     return False, "現在のパスワードが間違っています。"
 
-def create_token(username):
-    payload = {"username": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)}
-    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
 if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
 if "username" not in st.session_state: st.session_state["username"] = ""
-
-if not st.session_state["authenticated"] and "auth" in st.query_params:
-    try:
-        payload = jwt.decode(st.query_params["auth"], JWT_SECRET, algorithms=["HS256"])
-        st.session_state["authenticated"], st.session_state["username"] = True, payload["username"]
-        st.rerun()
-    except: pass
 
 if not st.session_state["authenticated"]:
     st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
     st.markdown("<h2 style='text-align: center;'>🔐 RWGS Analyzer</h2>", unsafe_allow_html=True)
     tab_login, tab_register, tab_reset = st.tabs(["🔑 ログイン", "📝 新規登録", "🔄 パスワード変更"])
-    
     with tab_login:
         u = st.text_input("ユーザー名", key="l_u")
         p = st.text_input("パスワード", type="password", key="l_p")
@@ -84,13 +72,10 @@ if not st.session_state["authenticated"]:
                 st.session_state["authenticated"], st.session_state["username"] = True, u
                 st.rerun()
             else: st.error("ユーザー名またはパスワードが違います。")
-            
     with tab_register:
         ru = st.text_input("希望ユーザー名", key="r_u")
         rp = st.text_input("パスワード", type="password", key="r_p")
-        if st.button("新規登録", use_container_width=True) and add_user(ru, rp):
-            st.success("作成完了！ログインしてください。")
-            
+        if st.button("新規登録", use_container_width=True) and add_user(ru, rp): st.success("作成完了！ログインしてください。")
     with tab_reset:
         reset_u = st.text_input("ユーザー名", key="res_u")
         reset_op = st.text_input("現在のパスワード", type="password", key="res_op")
@@ -132,19 +117,11 @@ def auto_optimize_timeline(df):
         if score < min_score: min_score, best_offset = score, offset
     return best_offset, gc_interval
 
-def calc_metrics(row):
-    co_conc, ch4_conc, co2_conc = row.get('CO_Conc', 0), row.get('CH4_Conc', 0), row.get('CO2_Conc', 0)
-    total_c_conc = co2_conc + co_conc + ch4_conc
-    conversion = (co_conc + ch4_conc) / total_c_conc * 100 if total_c_conc > 0 else 0
-    prod_c = co_conc + ch4_conc
-    return pd.Series([total_c_conc, conversion, co_conc / prod_c * 100 if prod_c > 0 else 0, ch4_conc / prod_c * 100 if prod_c > 0 else 0], 
-                     index=['Total_Carbon_Conc(%)', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)'])
-
 # ==========================================
 # 📊 UI 構築
 # ==========================================
 st.markdown("## 🧪 RWGS Catalyst Analytics")
-st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Single Session Pipeline</p>", unsafe_allow_html=True)
+st.markdown("<p style='color: #666; font-size: 1.1rem; margin-top: -10px;'>Single Session Pipeline (Robust Version)</p>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.markdown(f"👤 **ユーザー:** `{current_user}`")
@@ -180,7 +157,6 @@ if file_ch1 and file_ch2:
             cols_to_drop = [c for c in df_ch2.columns if c in df_ch1.columns]
             df = pd.concat([df_ch1.reset_index(drop=True), df_ch2.drop(columns=cols_to_drop).reset_index(drop=True)], axis=1)
             
-            # 🌟 【重要】手動編集時の「空白行(NaN)」エラーを完全に防ぐ処理
             df = df.dropna(subset=['Date', 'Time'])
             
             for col in ['CO2', 'CO', 'CH4', 'N2', 'O2']:
@@ -190,70 +166,27 @@ if file_ch1 and file_ch2:
                         df.loc[df[col] > 50000000, col] = 0
 
             df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
-            
-            # 🌟 さらに、日付として正しく認識できなかったバグ行も除外
             df = df.dropna(subset=['Datetime']).sort_values('Datetime').reset_index(drop=True)
             
             if not df.empty:
                 start_time = df['Datetime'].min()
                 df['Elapsed_min'] = (df['Datetime'] - start_time).dt.total_seconds() / 60.0
             else:
-                st.error("有効なデータが見つかりませんでした。ファイルの中身を確認してください。")
+                st.error("有効なデータが見つかりませんでした。")
                 st.stop()
 
+            # 濃度計算
             df['CO2_Conc'] = (df['CO2'] * calib_dict.get('CO2', {}).get('Slope', 1) + calib_dict.get('CO2', {}).get('Intercept', 0)).clip(lower=0)
             df['CO_Conc'] = (df['CO'] * calib_dict.get('CO', {}).get('Slope', 1) + calib_dict.get('CO', {}).get('Intercept', 0)).clip(lower=0)
             df['CH4_Conc'] = (df['CH4'] * calib_dict.get('CH4', {}).get('Slope', 1) + calib_dict.get('CH4', {}).get('Intercept', 0)).clip(lower=0)
+            df['Total_Carbon_Conc(%)'] = df['CO2_Conc'] + df['CO_Conc'] + df['CH4_Conc']
             
-            best_offset, gc_interval = auto_optimize_timeline(df)
-            df['Furnace_Time_min'] = df['Elapsed_min'] - best_offset
-            stage_info = df['Furnace_Time_min'].apply(get_smart_stage)
-            df['Temperature'], df['Stage'] = [x[0] for x in stage_info], [x[1] for x in stage_info]
+            # 🌟【重要：バグ対策】全データの中で「一番ガスがしっかり流れているポイント」の全炭素量を基準にする
+            max_carbon_baseline = df['Total_Carbon_Conc(%)'].max()
+            if max_carbon_baseline <= 0: max_carbon_baseline = 10.0 # 安全弁
             
-            df = pd.concat([df, df.apply(calc_metrics, axis=1)], axis=1)
+            # 転化率・選択率の再計算（基準をmax_carbon_baselineに統一）
+            df['CO2_Conversion(%)'] = (df['CO_Conc'] + df['CH4_Conc']) / max_carbon_baseline * 100
             
-            df['Status'] = '❌ 昇温・降温・安定化待ち'
-            df.loc[df['Temperature'].notna(), 'Status'] = '⚠️ プラトー前半'
-            
-            steady_indices = df.dropna(subset=['Temperature']).groupby('Temperature').tail(3).index
-            df.loc[steady_indices, 'Status'] = '✅ 定常状態'
-
-            final_result = df.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
-            
-            if not final_result.empty and 100 in final_result['Temperature'].values:
-                baseline_c = final_result.loc[final_result['Temperature'] == 100, 'Total_Carbon_Conc(%)'].values[0]
-                final_result['C-Balance(%)'] = final_result['Total_Carbon_Conc(%)'] / baseline_c * 100
-            else:
-                final_result['C-Balance(%)'] = 100.0
-                
-            cols_output = ['Temperature', 'C-Balance(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']
-            final_result = final_result[[c for c in cols_output if c in final_result.columns]]
-
-        st.markdown("---")
-        st.success(f"🎯 **解析完了:** \n測定開始から約 {best_offset:.1f} 分の遅れを自動検知してスケジュールを同期しました。")
-
-        if not final_result.empty:
-            max_temp = final_result['Temperature'].max()
-            m1, m2, m3 = st.columns(3)
-            m1.metric(label=f"最大転化率 (@{int(max_temp)}℃)", value=f"{final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
-            m2.metric(label="検出されたGC測定間隔", value=f"{gc_interval:.2f} min")
-            m3.metric(label="平均炭素バランス (C-Balance)", value=f"{final_result['C-Balance(%)'].mean():.2f} %")
-
-        tab1, tab2 = st.tabs(["📈 グラフ分析", "📋 定常状態データ一覧"])
-        with tab1:
-            st.markdown("<br>", unsafe_allow_html=True)
-            chart = alt.Chart(df).mark_circle(size=80, opacity=0.9).encode(
-                x=alt.X('Furnace_Time_min:Q', title='電気炉稼働時間 (分)', axis=alt.Axis(grid=False)),
-                y=alt.Y('CO_Conc:Q', title='CO 濃度 (%)', axis=alt.Axis(gridColor='#f0f0f0')),
-                color=alt.Color('Status:N', title='データ判定', 
-                                scale=alt.Scale(domain=['✅ 定常状態', '⚠️ プラトー前半', '❌ 昇温・降温・安定化待ち'], 
-                                                range=['#10b981', '#f59e0b', '#ef4444'])),
-                tooltip=['Furnace_Time_min', 'Temperature', 'Stage', 'CO_Conc', 'CO2_Conversion(%)', 'Status']
-            ).properties(height=400).interactive()
-            st.altair_chart(chart, use_container_width=True)
-
-        with tab2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.dataframe(final_result.style.format("{:.3f}"), use_container_width=True)
-            csv = final_result.to_csv(index=False).encode('shift_jis')
-            st.download_button(label="📥 結果をCSVでダウンロード", data=csv, file_name=f'RWGS_Result_{current_user}.csv', mime='text/csv')
+            prod_c = df['CO_Conc'] + df['CH4_Conc']
+            df['CO_Selectivity(%)'] = np.where(
