@@ -57,8 +57,19 @@ def update_password(username, old_password, new_password):
         return True, "パスワードを更新しました。"
     return False, "現在のパスワードが間違っています。"
 
+def create_token(username):
+    payload = {"username": username, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=30)}
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
 if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
 if "username" not in st.session_state: st.session_state["username"] = ""
+
+if not st.session_state["authenticated"] and "auth" in st.query_params:
+    try:
+        payload = jwt.decode(st.query_params["auth"], JWT_SECRET, algorithms=["HS256"])
+        st.session_state["authenticated"], st.session_state["username"] = True, payload["username"]
+        st.rerun()
+    except: pass
 
 if not st.session_state["authenticated"]:
     st.markdown("<div class='auth-box'>", unsafe_allow_html=True)
@@ -179,14 +190,67 @@ if file_ch1 and file_ch2:
             df['CO2_Conc'] = (df['CO2'] * calib_dict.get('CO2', {}).get('Slope', 1) + calib_dict.get('CO2', {}).get('Intercept', 0)).clip(lower=0)
             df['CO_Conc'] = (df['CO'] * calib_dict.get('CO', {}).get('Slope', 1) + calib_dict.get('CO', {}).get('Intercept', 0)).clip(lower=0)
             df['CH4_Conc'] = (df['CH4'] * calib_dict.get('CH4', {}).get('Slope', 1) + calib_dict.get('CH4', {}).get('Intercept', 0)).clip(lower=0)
-            df['Total_Carbon_Conc(%)'] = df['CO2_Conc'] + df['CO_Conc'] + df['CH4_Conc']
             
             # 🌟【重要：バグ対策】全データの中で「一番ガスがしっかり流れているポイント」の全炭素量を基準にする
+            df['Total_Carbon_Conc(%)'] = df['CO2_Conc'] + df['CO_Conc'] + df['CH4_Conc']
             max_carbon_baseline = df['Total_Carbon_Conc(%)'].max()
-            if max_carbon_baseline <= 0: max_carbon_baseline = 10.0 # 安全弁
             
-            # 転化率・選択率の再計算（基準をmax_carbon_baselineに統一）
-            df['CO2_Conversion(%)'] = (df['CO_Conc'] + df['CH4_Conc']) / max_carbon_baseline * 100
+            # もしデータが全て0などの異常な場合は、分母0を防ぐためにダミー値(10.0%)を入れる
+            if pd.isna(max_carbon_baseline) or max_carbon_baseline <= 0:
+                max_carbon_baseline = 10.0
+            
+            # Cバランス・転化率・選択率の計算（一括処理）
+            df['C-Balance(%)'] = (df['Total_Carbon_Conc(%)'] / max_carbon_baseline) * 100
+            df['CO2_Conversion(%)'] = ((df['CO_Conc'] + df['CH4_Conc']) / max_carbon_baseline) * 100
             
             prod_c = df['CO_Conc'] + df['CH4_Conc']
-            df['CO_Selectivity(%)'] = np.where(
+            df['CO_Selectivity(%)'] = np.where(prod_c > 0, (df['CO_Conc'] / prod_c) * 100, 0)
+            df['CH4_Selectivity(%)'] = np.where(prod_c > 0, (df['CH4_Conc'] / prod_c) * 100, 0)
+            
+            # タイムラインの自動同期
+            best_offset, gc_interval = auto_optimize_timeline(df)
+            df['Furnace_Time_min'] = df['Elapsed_min'] - best_offset
+            stage_info = df['Furnace_Time_min'].apply(get_smart_stage)
+            df['Temperature'], df['Stage'] = [x[0] for x in stage_info], [x[1] for x in stage_info]
+            
+            # ステータスの判定と定常状態の抽出
+            df['Status'] = '❌ 昇温・降温・安定化待ち'
+            df.loc[df['Temperature'].notna(), 'Status'] = '⚠️ プラトー前半'
+            
+            steady_indices = df.dropna(subset=['Temperature']).groupby('Temperature').tail(3).index
+            df.loc[steady_indices, 'Status'] = '✅ 定常状態'
+
+            # 最終結果の集計
+            final_result = df.loc[steady_indices].groupby('Temperature').mean(numeric_only=True).reset_index()
+            
+            cols_output = ['Temperature', 'C-Balance(%)', 'CO2_Conc', 'CO_Conc', 'CH4_Conc', 'CO2_Conversion(%)', 'CO_Selectivity(%)', 'CH4_Selectivity(%)']
+            final_result = final_result[[c for c in cols_output if c in final_result.columns]]
+
+        st.markdown("---")
+        st.success(f"🎯 **解析完了:** \n測定開始から約 {best_offset:.1f} 分の遅れを自動検知してスケジュールを同期しました。")
+
+        if not final_result.empty:
+            max_temp = final_result['Temperature'].max()
+            m1, m2, m3 = st.columns(3)
+            m1.metric(label=f"最大転化率 (@{int(max_temp)}℃)", value=f"{final_result.loc[final_result['Temperature'] == max_temp, 'CO2_Conversion(%)'].values[0]:.2f} %")
+            m2.metric(label="検出されたGC測定間隔", value=f"{gc_interval:.2f} min")
+            m3.metric(label="平均炭素バランス (C-Balance)", value=f"{final_result['C-Balance(%)'].mean():.2f} %")
+
+        tab1, tab2 = st.tabs(["📈 グラフ分析", "📋 定常状態データ一覧"])
+        with tab1:
+            st.markdown("<br>", unsafe_allow_html=True)
+            chart = alt.Chart(df).mark_circle(size=80, opacity=0.9).encode(
+                x=alt.X('Furnace_Time_min:Q', title='電気炉稼働時間 (分)', axis=alt.Axis(grid=False)),
+                y=alt.Y('CO_Conc:Q', title='CO 濃度 (%)', axis=alt.Axis(gridColor='#f0f0f0')),
+                color=alt.Color('Status:N', title='データ判定', 
+                                scale=alt.Scale(domain=['✅ 定常状態', '⚠️ プラトー前半', '❌ 昇温・降温・安定化待ち'], 
+                                                range=['#10b981', '#f59e0b', '#ef4444'])),
+                tooltip=['Furnace_Time_min', 'Temperature', 'Stage', 'CO_Conc', 'CO2_Conversion(%)', 'C-Balance(%)', 'Status']
+            ).properties(height=400).interactive()
+            st.altair_chart(chart, use_container_width=True)
+
+        with tab2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.dataframe(final_result.style.format("{:.3f}"), use_container_width=True)
+            csv = final_result.to_csv(index=False).encode('shift_jis')
+            st.download_button(label="📥 結果をCSVでダウンロード", data=csv, file_name=f'RWGS_Result_{current_user}.csv', mime='text/csv')
