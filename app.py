@@ -6,6 +6,7 @@ import os
 import hashlib
 import jwt
 import datetime
+import re  # 🌟 ファイル名からの時間抽出のために追加
 
 # ==========================================
 # ページ設定
@@ -48,7 +49,7 @@ if "authenticated" not in st.session_state: st.session_state["authenticated"] = 
 if "username" not in st.session_state: st.session_state["username"] = ""
 
 if not st.session_state["authenticated"]:
-    st.markdown("<div class='auth-box'><h2 style='text-align: center;'>🔐 RWGS Analyzer</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='auth-box'><h2 style='text-align: center;'>🔐 RWGS Analyzer</h2></div>", unsafe_allow_html=True)
     tab1, tab2 = st.tabs(["🔑 ログイン", "📝 新規登録"])
     with tab1:
         u = st.text_input("ユーザー名", key="l_u")
@@ -60,7 +61,6 @@ if not st.session_state["authenticated"]:
         ru = st.text_input("希望ユーザー名", key="r_u")
         rp = st.text_input("パスワード", type="password", key="r_p")
         if st.button("新規登録", use_container_width=True) and add_user(ru, rp): st.success("作成完了！")
-    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 current_user = st.session_state["username"]
@@ -100,15 +100,13 @@ with st.sidebar:
         st.rerun()
     st.markdown("---")
     
-    # 🌟 1. 初期のゴミデータを切り捨てる設定
     st.markdown("### ✂️ データトリミング設定")
-    ignore_mins = st.number_input("測定開始から除外する時間 (分)", min_value=0, max_value=200, value=0, step=5, help="GCの挙動が不安定な最初の時間を切り捨てます（例：60分）")
+    ignore_mins = st.number_input("測定開始から除外する時間 (分)", min_value=0, max_value=200, value=0, step=5, help="GCの挙動が不安定な最初の時間を切り捨てます")
     
     st.markdown("---")
     st.markdown("### ⚙️ キャリブレーション設定")
     USER_CALIB_FILE = f"calib_settings_{current_user}.csv"
     
-    # 🌟 2. CH4の係数を暴走しない正しい値にデフォルト修正
     DEFAULT_CALIB = pd.DataFrame({'Gas': ['CO2', 'CO', 'CH4'], 'Slope': [4.75e-07, 1.44e-06, 1.29e-06], 'Intercept': [0.0, 0.0, 0.0]})
     user_calib_df = pd.read_csv(USER_CALIB_FILE) if os.path.exists(USER_CALIB_FILE) else DEFAULT_CALIB.copy()
     edited_calib_df = st.data_editor(
@@ -134,15 +132,32 @@ if file_ch1 and file_ch2:
             cols_to_drop = [c for c in df_ch2.columns if c in df_ch1.columns]
             df = pd.concat([df_ch1.reset_index(drop=True), df_ch2.drop(columns=cols_to_drop).reset_index(drop=True)], axis=1)
             
-            # NaN行の削除と数値変換
-            df = df.dropna(subset=['Date', 'Time'])
+            # 🌟 欠損値対策: 日時計算のベースとなる列の存在確認
+            if 'File Name' in df.columns:
+                df = df.dropna(subset=['File Name'])
+            else:
+                df = df.dropna(subset=['Date', 'Time'])
+
             for col in ['CO2', 'CO', 'CH4', 'N2', 'O2']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
                     if col in ['O2', 'N2']: df.loc[df[col] > 50000000, col] = 0
 
-            # 時間計算
-            df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
+            # 🌟 時間計算: ファイル名から本来の測定日時を抽出するロジック
+            def extract_real_time(filename):
+                match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2})', str(filename))
+                if match:
+                    return pd.to_datetime(match.group(1), format='%Y-%m-%d %H-%M-%S', errors='coerce')
+                return pd.NaT
+
+            if 'File Name' in df.columns:
+                df['Datetime'] = df['File Name'].apply(extract_real_time)
+                # 抽出失敗時のフォールバックとして従来の時刻を使用
+                fallback_dt = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
+                df['Datetime'] = df['Datetime'].fillna(fallback_dt)
+            else:
+                df['Datetime'] = pd.to_datetime(df['Date'].astype(str).str.strip() + ' ' + df['Time'].astype(str).str.strip(), errors='coerce')
+
             df = df.dropna(subset=['Datetime']).sort_values('Datetime').reset_index(drop=True)
             
             if df.empty:
@@ -152,7 +167,6 @@ if file_ch1 and file_ch2:
             start_time = df['Datetime'].min()
             df['Elapsed_min'] = (df['Datetime'] - start_time).dt.total_seconds() / 60.0
             
-            # 🌟 指定された「除外時間」以前のゴミデータを完全に切り捨てる
             df = df[df['Elapsed_min'] >= ignore_mins].reset_index(drop=True)
             
             if df.empty:
@@ -165,12 +179,11 @@ if file_ch1 and file_ch2:
             df['CH4_Conc'] = (df['CH4'] * calib_dict.get('CH4', {}).get('Slope', 1) + calib_dict.get('CH4', {}).get('Intercept', 0)).clip(lower=0)
             df['Total_Carbon_Conc(%)'] = df['CO2_Conc'] + df['CO_Conc'] + df['CH4_Conc']
             
-            # 🌟 3. C-Balanceの基準をスパイクに引っ張られない「上位95%ライン」に設定
             baseline_candidates = df['Total_Carbon_Conc(%)'].dropna()
             max_carbon_baseline = np.percentile(baseline_candidates, 95) if not baseline_candidates.empty else 10.0
             if max_carbon_baseline <= 0: max_carbon_baseline = 10.0
             
-            # 各種計算（np.where を正しく閉じています）
+            # 各種計算
             df['C-Balance(%)'] = (df['Total_Carbon_Conc(%)'] / max_carbon_baseline) * 100
             df['CO2_Conversion(%)'] = ((df['CO_Conc'] + df['CH4_Conc']) / max_carbon_baseline) * 100
             
