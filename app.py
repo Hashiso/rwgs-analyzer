@@ -4,9 +4,7 @@ import numpy as np
 import altair as alt
 import os
 import hashlib
-import jwt
-import datetime
-import re  # 🌟 ファイル名からの時間抽出のために追加
+import re
 
 # ==========================================
 # ページ設定
@@ -21,21 +19,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 🔐 1. ユーザー認証
+# 1. ユーザー認証
 # ==========================================
 USER_DB_FILE = "users.csv"
-JWT_SECRET = "ku_rwgs_secret_key_2026"
 
-def make_hashes(p): return hashlib.sha256(str.encode(p)).hexdigest()
-def check_hashes(p, hp): return make_hashes(p) == hp
+def make_hashes(p): 
+    return hashlib.sha256(str.encode(p)).hexdigest()
+
+def check_hashes(p, hp): 
+    return make_hashes(p) == hp
 
 def load_users():
-    if os.path.exists(USER_DB_FILE): return pd.read_csv(USER_DB_FILE)
+    if os.path.exists(USER_DB_FILE): 
+        return pd.read_csv(USER_DB_FILE)
     return pd.DataFrame(columns=["username", "password_hash"])
 
 def add_user(u, p):
     df = load_users()
-    if u in df["username"].values: return False
+    if u in df["username"].values: 
+        return False
     df = pd.concat([df, pd.DataFrame([[u, make_hashes(p)]], columns=["username", "password_hash"])], ignore_index=True)
     df.to_csv(USER_DB_FILE, index=False)
     return True
@@ -45,8 +47,10 @@ def login_user(u, p):
     user_rows = df[df["username"] == u]
     return check_hashes(p, user_rows.iloc[0]["password_hash"]) if not user_rows.empty else False
 
-if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
-if "username" not in st.session_state: st.session_state["username"] = ""
+if "authenticated" not in st.session_state: 
+    st.session_state["authenticated"] = False
+if "username" not in st.session_state: 
+    st.session_state["username"] = ""
 
 if not st.session_state["authenticated"]:
     st.markdown("<div class='auth-box'><h2 style='text-align: center;'>🔐 RWGS Analyzer</h2></div>", unsafe_allow_html=True)
@@ -60,7 +64,8 @@ if not st.session_state["authenticated"]:
     with tab2:
         ru = st.text_input("希望ユーザー名", key="r_u")
         rp = st.text_input("パスワード", type="password", key="r_p")
-        if st.button("新規登録", use_container_width=True) and add_user(ru, rp): st.success("作成完了！")
+        if st.button("新規登録", use_container_width=True) and add_user(ru, rp): 
+            st.success("作成完了！")
     st.stop()
 
 current_user = st.session_state["username"]
@@ -69,7 +74,8 @@ current_user = st.session_state["username"]
 # 分析コアロジック
 # ==========================================
 def get_smart_stage(elapsed_min):
-    if pd.isna(elapsed_min) or elapsed_min < 0: return np.nan, "待機"
+    if pd.isna(elapsed_min) or elapsed_min < 0: 
+        return np.nan, "待機"
     schedule = [(0,20,100), (20,40,200), (40,60,300), (60,80,350), (80,103,400), (103,126,450), (126,149,500), (149,172,550), (172,195,600)]
     for start, end, temp in schedule:
         if start <= elapsed_min < end:
@@ -78,14 +84,17 @@ def get_smart_stage(elapsed_min):
 
 def auto_optimize_timeline(df):
     gc_interval = df['Elapsed_min'].diff().median()
-    if pd.isna(gc_interval) or gc_interval <= 0: gc_interval = 2.45
+    if pd.isna(gc_interval) or gc_interval <= 0: 
+        gc_interval = 2.45
     best_offset, min_score = 0.0, float('inf')
     for offset in np.arange(0, 40, 0.5):
         stages = (df['Elapsed_min'] - offset).apply(lambda x: get_smart_stage(x)[0])
         df_temp = pd.DataFrame({'Temp': stages, 'CO': df['CO_Conc']}).dropna()
-        if df_temp['Temp'].nunique() < 1: continue
+        if df_temp['Temp'].nunique() < 1: 
+            continue
         score = df_temp.groupby('Temp')['CO'].std().fillna(0).sum() / df_temp['Temp'].nunique()
-        if score < min_score: min_score, best_offset = score, offset
+        if score < min_score: 
+            min_score, best_offset = score, offset
     return best_offset, gc_interval
 
 # ==========================================
@@ -114,7 +123,8 @@ with st.sidebar:
         column_config={"Slope": st.column_config.NumberColumn("Slope", format="%.3e"), "Intercept": st.column_config.NumberColumn("Intercept", format="%.4f")}
     )
     calib_dict = edited_calib_df.set_index('Gas').to_dict(orient='index')
-    if st.button("💾 係数を保存"): edited_calib_df.to_csv(USER_CALIB_FILE, index=False)
+    if st.button("💾 係数を保存"): 
+        edited_calib_df.to_csv(USER_CALIB_FILE, index=False)
 
 st.markdown("#### 📂 Raw Data ファイルのアップロード")
 col1, col2 = st.columns(2)
@@ -132,16 +142,19 @@ if file_ch1 and file_ch2:
             cols_to_drop = [c for c in df_ch2.columns if c in df_ch1.columns]
             df = pd.concat([df_ch1.reset_index(drop=True), df_ch2.drop(columns=cols_to_drop).reset_index(drop=True)], axis=1)
             
-            # 🌟 欠損値対策: 日時計算のベースとなる列の存在確認
+            # 欠損値対策: 日時計算のベースとなる列の存在確認
             if 'File Name' in df.columns:
                 df = df.dropna(subset=['File Name'])
             else:
                 df = df.dropna(subset=['Date', 'Time'])
 
+            # 🌟 数値変換エラー回避処理 (空白文字の除去)
             for col in ['CO2', 'CO', 'CH4', 'N2', 'O2']:
                 if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                    if col in ['O2', 'N2']: df.loc[df[col] > 50000000, col] = 0
+                    # astype(str).str.strip() で空白を除去してから数値化
+                    df[col] = pd.to_numeric(df[col].astype(str).str.strip(), errors='coerce').fillna(0)
+                    if col in ['O2', 'N2']: 
+                        df.loc[df[col] > 50000000, col] = 0
 
             # 🌟 時間計算: ファイル名から本来の測定日時を抽出するロジック
             def extract_real_time(filename):
