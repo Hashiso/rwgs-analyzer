@@ -24,6 +24,7 @@ FILENAME_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2})")
 
 STATUS_STEADY = "✅ 定常状態"
 STATUS_EARLY = "⚠️ プラトー（採用外）"
+STATUS_PROVISIONAL = "🔶 暫定採用（昇温中を含む）"
 STATUS_WAIT = "❌ 昇温・降温・安定化待ち"
 
 DEFAULT_CALIB = pd.DataFrame(
@@ -339,15 +340,38 @@ def run_analysis(
     df.loc[hold, "Status"] = STATUS_EARLY
     stage_end = df["Temperature"].map(schedule.set_index("temp")["end_min"])
     eligible = hold & (df["Furnace_Time_min"] < stage_end - cfg.tail_margin_min)
-    steady_idx = df[eligible].groupby("Temperature").tail(cfg.n_steady).index
+    steady_idx = list(df[eligible].groupby("Temperature").tail(cfg.n_steady).index)
     df.loc[steady_idx, "Status"] = STATUS_STEADY
 
-    counts_hold = df[hold].groupby("Temperature").size()
-    absent = sorted(set(schedule["temp"]) - set(counts_hold.index))
+    # 維持区間に採用できる点が無いステージ：区間内の点（昇温中を含む）を暫定採用して値は出す
+    provisional: set[float] = set()
+    prov_idx: list[int] = []
+    done = set(df.loc[steady_idx, "Temperature"])
+    for start, end, tmp in schedule[["start_min", "end_min", "temp"]].itertuples(index=False):
+        if tmp in done:
+            continue
+        win = df[(df["Furnace_Time_min"] >= start) & (df["Furnace_Time_min"] < end)]
+        pref = win[win["Furnace_Time_min"] < end - cfg.tail_margin_min]
+        use = (pref if not pref.empty else win).tail(cfg.n_steady)
+        if use.empty:
+            continue
+        prov_idx += list(use.index)
+        provisional.add(float(tmp))
+        df.loc[use.index, "Temperature"] = tmp
+        df.loc[use.index, "Status"] = STATUS_PROVISIONAL
+
+    got = set(df.loc[steady_idx + prov_idx, "Temperature"])
+    absent = sorted(set(schedule["temp"]) - got)
     if absent:
         warns.append(f"データに現れなかった温度ステージ: {', '.join(f'{t:g}℃' for t in absent)}")
+    if provisional:
+        warns.append(
+            "定常と判定できる点が無かったため、昇温中の点を暫定採用した温度: "
+            + ", ".join(f"{t:g}℃" for t in sorted(provisional)) + "（値は参考。Note列に明記）"
+        )
+    counts_hold = df[hold].groupby("Temperature").size()
     counts = df[eligible].groupby("Temperature").size().reindex(counts_hold.index, fill_value=0)
-    short = counts[counts < cfg.n_steady]
+    short = counts[(counts < cfg.n_steady) & ~counts.index.isin(list(provisional))]
     if not short.empty:
         warns.append(
             f"定常状態の点数が {cfg.n_steady} 点に満たない温度: "
@@ -355,11 +379,15 @@ def run_analysis(
             + "（「昇温/安定化に除く時間」や「終了側で除く時間」を小さくすると増えます）"
         )
 
-    steady = df.loc[steady_idx]
+    steady = df.loc[steady_idx + prov_idx]
     grp = steady.groupby("Temperature")
     summary = grp[SUMMARY_VALUE_COLS].mean().reset_index()
     summary["CO2_Conversion_SD(%)"] = grp["CO2_Conversion(%)"].std().to_numpy()
     summary["N_points"] = grp.size().to_numpy()
+    summary["Note"] = [
+        "暫定（昇温中の点を含む）" if t in provisional else (f"点数不足（{n}点）" if n < cfg.n_steady else "")
+        for t, n in zip(summary["Temperature"], summary["N_points"])
+    ]
 
     return AnalysisResult(df, summary, offset, score, gc_interval, baseline, warns, scan, cfg.offset_mode)
 
@@ -527,8 +555,8 @@ def main() -> None:
         points = base.mark_circle(size=80).encode(
             color=alt.Color(
                 "Status:N", title="状態",
-                scale=alt.Scale(domain=[STATUS_STEADY, STATUS_EARLY, STATUS_WAIT],
-                                range=["#10b981", "#f59e0b", "#ef4444"]),
+                scale=alt.Scale(domain=[STATUS_STEADY, STATUS_PROVISIONAL, STATUS_EARLY, STATUS_WAIT],
+                                range=["#10b981", "#3b82f6", "#f59e0b", "#ef4444"]),
             ),
             tooltip=[
                 alt.Tooltip("Temperature:Q", title="温度 (℃)"),
@@ -540,7 +568,7 @@ def main() -> None:
         st.altair_chart((line + points).properties(height=400).interactive(), width="stretch")
 
     with tab_summary:
-        fmt = {c: "{:.3f}" for c in summary.columns if c not in ("Temperature", "N_points")}
+        fmt = {c: "{:.3f}" for c in summary.columns if c not in ("Temperature", "N_points", "Note")}
         fmt.update({"Temperature": "{:g}", "N_points": "{:d}"})
         st.dataframe(summary.style.format(fmt, na_rep="-"), width="stretch", hide_index=True)
         st.download_button(
