@@ -23,7 +23,7 @@ DEFAULT_GC_INTERVAL_MIN = 2.45
 FILENAME_TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2})")
 
 STATUS_STEADY = "✅ 定常状態"
-STATUS_EARLY = "⚠️ プラトー前半"
+STATUS_EARLY = "⚠️ プラトー（採用外）"
 STATUS_WAIT = "❌ 昇温・降温・安定化待ち"
 
 DEFAULT_CALIB = pd.DataFrame(
@@ -47,7 +47,8 @@ class AnalysisConfig:
     schedule: pd.DataFrame = field(default_factory=lambda: DEFAULT_SCHEDULE.copy())
     ignore_mins: float = 0.0          # 測定開始から除外する時間
     settle_min: float = 8.0           # 各ステージ開始後の昇温/安定化時間
-    n_steady: int = 3                 # 各温度で定常とみなす末尾点数
+    n_steady: int = 3                 # 各温度で定常とみなす点数
+    tail_margin_min: float = 2.0      # ステージ終了のこの時間前以降の点は除外（次の昇温の立ち上がり対策）
     offset_mode: str = "auto"         # "auto" | "manual"
     offset_manual: float = 0.0        # 手動指定時のオフセット（分）
     offset_min: float = 0.0           # 自動探索の範囲（分）
@@ -332,22 +333,26 @@ def run_analysis(
     temp, stage = assign_stage(df["Furnace_Time_min"].to_numpy(), schedule, cfg.settle_min)
     df["Temperature"], df["Stage"] = temp, stage
 
-    # 定常状態
+    # 定常状態：維持区間のうち「ステージ終了の tail_margin_min 分前まで」の最後の n_steady 点
     df["Status"] = STATUS_WAIT
     hold = df["Temperature"].notna()
     df.loc[hold, "Status"] = STATUS_EARLY
-    steady_idx = df[hold].groupby("Temperature").tail(cfg.n_steady).index
+    stage_end = df["Temperature"].map(schedule.set_index("temp")["end_min"])
+    eligible = hold & (df["Furnace_Time_min"] < stage_end - cfg.tail_margin_min)
+    steady_idx = df[eligible].groupby("Temperature").tail(cfg.n_steady).index
     df.loc[steady_idx, "Status"] = STATUS_STEADY
 
-    counts = df[hold].groupby("Temperature").size()
-    absent = sorted(set(schedule["temp"]) - set(counts.index))
+    counts_hold = df[hold].groupby("Temperature").size()
+    absent = sorted(set(schedule["temp"]) - set(counts_hold.index))
     if absent:
         warns.append(f"データに現れなかった温度ステージ: {', '.join(f'{t:g}℃' for t in absent)}")
+    counts = df[eligible].groupby("Temperature").size().reindex(counts_hold.index, fill_value=0)
     short = counts[counts < cfg.n_steady]
     if not short.empty:
         warns.append(
             f"定常状態の点数が {cfg.n_steady} 点に満たない温度: "
             + ", ".join(f"{t:g}℃ ({n}点)" for t, n in short.items())
+            + "（「昇温/安定化に除く時間」や「終了側で除く時間」を小さくすると増えます）"
         )
 
     steady = df.loc[steady_idx]
@@ -398,7 +403,11 @@ def main() -> None:
                 },
             )
             settle_min = st.number_input("昇温/安定化に除く時間 (分)", 0.0, 60.0, 8.0, 1.0)
-            n_steady = st.number_input("定常状態とみなす末尾点数", 1, 20, 3, 1)
+            n_steady = st.number_input("定常状態とみなす点数", 1, 20, 3, 1)
+            tail_margin = st.number_input(
+                "ステージ終了側で除く時間 (分)", 0.0, 10.0, 2.0, 0.5,
+                help="各温度の終了直前は次の昇温の立ち上がりが混ざることがあるため、この時間内の点は定常に含めません。",
+            )
             offset_label = st.radio(
                 "オフセット（GC開始と炉スケジュールのずれ）", ["自動推定", "手動指定"], horizontal=True,
                 help="炉時間 = GC経過時間 − オフセット。正の値は、GCの測定開始より炉のスケジュール開始（＋応答の遅れ）が後であることを表します。",
@@ -437,7 +446,7 @@ def main() -> None:
                 with st.spinner("データを処理しています..."):
                     cfg = AnalysisConfig(
                         schedule=schedule_df, ignore_mins=float(ignore_mins), settle_min=float(settle_min),
-                        n_steady=int(n_steady), offset_min=float(offset_min), offset_max=float(offset_max),
+                        n_steady=int(n_steady), tail_margin_min=float(tail_margin), offset_min=float(offset_min), offset_max=float(offset_max),
                         offset_mode="manual" if offset_label == "手動指定" else "auto", offset_manual=float(offset_manual),
                         baseline_mode="manual" if baseline_manual else "p95", baseline_manual=baseline_manual,
                     )
