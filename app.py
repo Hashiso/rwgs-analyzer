@@ -48,7 +48,10 @@ class AnalysisConfig:
     ignore_mins: float = 0.0          # 測定開始から除外する時間
     settle_min: float = 8.0           # 各ステージ開始後の昇温/安定化時間
     n_steady: int = 3                 # 各温度で定常とみなす末尾点数
-    max_offset: float = 40.0          # オフセット探索の上限（分）
+    offset_mode: str = "auto"         # "auto" | "manual"
+    offset_manual: float = 0.0        # 手動指定時のオフセット（分）
+    offset_min: float = 0.0           # 自動探索の範囲（分）
+    offset_max: float = 40.0
     baseline_mode: str = "p95"        # "p95" | "manual"
     baseline_manual: float | None = None
     overflow_threshold: float = 5e7   # N2/O2 のオーバーフロー値判定
@@ -63,6 +66,8 @@ class AnalysisResult:
     gc_interval: float
     baseline: float
     warnings: list[str]
+    offset_scan: pd.DataFrame | None = None
+    offset_mode: str = "auto"
 
 
 # ======================================================================
@@ -211,42 +216,43 @@ def assign_stage(furnace_time, schedule: pd.DataFrame, settle_min: float):
     return temp, label
 
 
-def optimize_offset(
-    elapsed: np.ndarray, co: np.ndarray, schedule: pd.DataFrame, settle_min: float,
-    max_offset: float = 40.0, step: float = 0.5, min_points: int = 2,
-) -> tuple[float, float, bool]:
-    """ステージ内 CO 濃度のばらつき（全分散で正規化）が最小となるオフセットを探索。
+def _stage_groups(t: np.ndarray, schedule: pd.DataFrame) -> np.ndarray:
+    """炉時間 → グループ番号。0: 開始前, 1: 終了後・区間外, 2+k: k番目のステージ区間（昇温/安定化を含む）"""
+    g = np.ones(t.shape, dtype=int)
+    g[t < schedule["start_min"].iloc[0]] = 0
+    for k, (start, end) in enumerate(schedule[["start_min", "end_min"]].itertuples(index=False)):
+        g[(t >= start) & (t < end)] = 2 + k
+    return g
 
-    旧実装は「点が1つしか残らない」オフセットで std=NaN→0 となり不当に有利だったため、
-    各ステージ min_points 点以上・全ステージの 80% 以上が揃うオフセットのみ評価する。
-    戻り値: (offset, score, 有効な探索ができたか)
+
+def scan_offsets(elapsed: np.ndarray, co: np.ndarray, schedule: pd.DataFrame, offsets) -> pd.DataFrame:
+    """各オフセットで「ステージ区間ごとの平均値で CO を説明した残差（全分散で正規化）」を計算する。
+
+    小さいほど、CO の階段状の変化とスケジュールの区切りが一致している。
+    全データ（昇温中の点も含む）を評価するので、高CO側を“除外”して有利になることがない。
+    covered: データが1点以上あるステージ数（測定がスケジュールをどこまで覆っているか）。
     """
-    total_var = float(np.nanvar(co))
-    if not np.isfinite(total_var) or total_var <= 0:
-        return 0.0, float("nan"), False
-
     n_stages = len(schedule)
-    offsets = np.arange(0.0, max_offset + step / 2, step)
-    for frac in (0.8, 0.0):  # 80% を満たせなければ条件を緩めて再探索
-        best_off, best_score = 0.0, float("inf")
-        need = max(1, int(np.ceil(frac * n_stages)))
-        for off in offsets:
-            temp, _ = assign_stage(elapsed - off, schedule, settle_min)
-            valid = ~np.isnan(temp)
-            if not valid.any():
-                continue
-            grp = pd.DataFrame({"T": temp[valid], "CO": co[valid]}).groupby("T")["CO"]
-            n = grp.count()
-            ss = grp.apply(lambda x: float(((x - x.mean()) ** 2).sum()))
-            ok = n >= min_points
-            if ok.sum() < need:
-                continue
-            score = ss[ok].sum() / n[ok].sum() / total_var
-            if score < best_score:
-                best_off, best_score = float(off), float(score)
-        if np.isfinite(best_score):
-            return best_off, best_score, frac > 0
-    return 0.0, float("nan"), False
+    ss_tot = float(((co - co.mean()) ** 2).sum())
+    rows = []
+    for off in offsets:
+        g = _stage_groups(elapsed - off, schedule)
+        cnt = np.bincount(g, minlength=n_stages + 2)
+        mean = np.bincount(g, weights=co, minlength=n_stages + 2) / np.maximum(cnt, 1)
+        ss = float(((co - mean[g]) ** 2).sum())
+        rows.append((float(off), ss / ss_tot if ss_tot > 0 else np.nan, int((cnt[2:] >= 1).sum())))
+    return pd.DataFrame(rows, columns=["offset", "score", "covered"])
+
+
+def pick_offset(scan: pd.DataFrame, n_stages: int) -> tuple[float, float, bool]:
+    """最良のオフセットを選ぶ。全ステージを測定が覆うオフセットを優先する（約23分周期の取り違え防止）。"""
+    valid = scan.dropna(subset=["score"])
+    if valid.empty:
+        return 0.0, float("nan"), False
+    full = valid[valid["covered"] == n_stages]
+    cand = full if not full.empty else valid
+    best = cand.loc[cand["score"].idxmin()]  # 同点なら小さいオフセット
+    return float(best["offset"]), float(best["score"]), not full.empty
 
 
 # ======================================================================
@@ -298,13 +304,29 @@ def run_analysis(
     gc_interval = float(df["Elapsed_min"].diff().median())
     if not np.isfinite(gc_interval) or gc_interval <= 0:
         gc_interval = DEFAULT_GC_INTERVAL_MIN
-    offset, score, good = optimize_offset(
-        df["Elapsed_min"].to_numpy(), df["CO_Conc"].to_numpy(), schedule, cfg.settle_min, cfg.max_offset
-    )
-    if not np.isfinite(score):
-        warns.append("オフセットを自動推定できませんでした（CO濃度が一定、または点数不足）。0分を使用しています。")
-    elif not good:
-        warns.append("全ステージが揃わないデータのため、オフセット推定の信頼性が低い可能性があります。")
+    elapsed, co = df["Elapsed_min"].to_numpy(), df["CO_Conc"].to_numpy()
+    if cfg.offset_max <= cfg.offset_min:
+        raise ValueError("オフセット探索の上限は下限より大きくしてください。")
+    scan = scan_offsets(elapsed, co, schedule, np.arange(cfg.offset_min, cfg.offset_max + 0.25, 0.5))
+    n_stages = len(schedule)
+    if cfg.offset_mode == "manual":
+        offset = float(cfg.offset_manual)
+        score = float(scan_offsets(elapsed, co, schedule, [offset])["score"].iloc[0])
+    else:
+        offset, score, full = pick_offset(scan, n_stages)
+        if not np.isfinite(score):
+            warns.append("オフセットを自動推定できませんでした（CO濃度が一定、または点数不足）。0分を使用しています。")
+        else:
+            if not full:
+                warns.append("測定がスケジュール全体を覆うオフセットがありませんでした（測定が途中で終わっている可能性）。"
+                             "ステージの対応を探索グラフで確認してください。")
+            cand = scan[scan["covered"] == n_stages] if full else scan
+            alt = cand[(cand["score"] <= score * 1.5 + 1e-12) & ((cand["offset"] - offset).abs() >= 5)]
+            if not alt.empty:
+                warns.append(f"オフセット {alt.iloc[0]['offset']:g}分 でも同程度に合います（階段状データは周期的に似るため）。"
+                             "結果が不自然なら手動指定してください。")
+            if offset <= cfg.offset_min or offset >= cfg.offset_max:
+                warns.append("最良のオフセットが探索範囲の端です。範囲を広げて確認してください。")
 
     df["Furnace_Time_min"] = df["Elapsed_min"] - offset
     temp, stage = assign_stage(df["Furnace_Time_min"].to_numpy(), schedule, cfg.settle_min)
@@ -334,7 +356,7 @@ def run_analysis(
     summary["CO2_Conversion_SD(%)"] = grp["CO2_Conversion(%)"].std().to_numpy()
     summary["N_points"] = grp.size().to_numpy()
 
-    return AnalysisResult(df, summary, offset, score, gc_interval, baseline, warns)
+    return AnalysisResult(df, summary, offset, score, gc_interval, baseline, warns, scan, cfg.offset_mode)
 
 
 # ===== UI =====（ここから下が Streamlit の画面）
@@ -377,7 +399,17 @@ def main() -> None:
             )
             settle_min = st.number_input("昇温/安定化に除く時間 (分)", 0.0, 60.0, 8.0, 1.0)
             n_steady = st.number_input("定常状態とみなす末尾点数", 1, 20, 3, 1)
-            max_offset = st.number_input("オフセット探索の上限 (分)", 0.0, 120.0, 40.0, 5.0)
+            offset_label = st.radio(
+                "オフセット（GC開始と炉スケジュールのずれ）", ["自動推定", "手動指定"], horizontal=True,
+                help="炉時間 = GC経過時間 − オフセット。正の値は、GCの測定開始より炉のスケジュール開始（＋応答の遅れ）が後であることを表します。",
+            )
+            offset_min, offset_max, offset_manual = 0.0, 40.0, 0.0
+            if offset_label == "手動指定":
+                offset_manual = st.number_input("オフセット (分)", -120.0, 120.0, 10.0, 0.5)
+            else:
+                oc1, oc2 = st.columns(2)
+                offset_min = oc1.number_input("探索 下限 (分)", -120.0, 120.0, 0.0, 5.0)
+                offset_max = oc2.number_input("探索 上限 (分)", -120.0, 120.0, 40.0, 5.0)
 
         with st.expander("🧮 基準炭素量"):
             baseline_label = st.radio(
@@ -405,7 +437,8 @@ def main() -> None:
                 with st.spinner("データを処理しています..."):
                     cfg = AnalysisConfig(
                         schedule=schedule_df, ignore_mins=float(ignore_mins), settle_min=float(settle_min),
-                        n_steady=int(n_steady), max_offset=float(max_offset),
+                        n_steady=int(n_steady), offset_min=float(offset_min), offset_max=float(offset_max),
+                        offset_mode="manual" if offset_label == "手動指定" else "auto", offset_manual=float(offset_manual),
                         baseline_mode="manual" if baseline_manual else "p95", baseline_manual=baseline_manual,
                     )
                     result = run_analysis(
@@ -431,7 +464,8 @@ def main() -> None:
     sample = st.session_state.get("sample", "RWGS")
     df, summary = result.df, result.summary
 
-    st.success(f"🎯 解析完了！ (オフセット: {result.offset:.1f}分 / 基準炭素量: {result.baseline:.2f}%)")
+    st.success(f"🎯 解析完了！ (オフセット: {result.offset:.1f}分{'（手動）' if result.offset_mode == 'manual' else ''}"
+               f" / 基準炭素量: {result.baseline:.2f}%)")
     if result.warnings:
         with st.expander(f"⚠️ 警告 {len(result.warnings)} 件", expanded=True):
             for w in result.warnings:
@@ -444,7 +478,22 @@ def main() -> None:
         m2.metric("測定間隔", f"{result.gc_interval:.2f} min")
         m3.metric("平均C-Balance", f"{summary['C-Balance(%)'].mean():.2f} %")
         m4.metric("同期スコア", "-" if pd.isna(result.offset_score) else f"{result.offset_score:.3f}",
-                  help="ステージ内ばらつき/全体ばらつき。小さいほど温度ステージとデータが良く同期しています。")
+                  help="ステージ区間ごとの平均で説明できなかった分/全体のばらつき。小さいほど温度ステージとデータが良く同期しています。")
+
+    with st.expander("🔍 オフセット探索の詳細（同期スコア）"):
+        scan = result.offset_scan
+        if scan is not None and not scan.empty:
+            line = alt.Chart(scan).mark_line().encode(
+                x=alt.X("offset:Q", title="オフセット (分)"),
+                y=alt.Y("score:Q", title="同期スコア（小さいほど良い）"),
+                tooltip=[alt.Tooltip("offset:Q", title="オフセット (分)"),
+                         alt.Tooltip("score:Q", title="スコア", format=".4f"),
+                         alt.Tooltip("covered:Q", title="カバーするステージ数")],
+            )
+            rule = alt.Chart(pd.DataFrame({"offset": [result.offset]})).mark_rule(color="#ef4444").encode(x="offset:Q")
+            st.altair_chart(line + rule, width="stretch")
+        st.caption("赤線が採用値。階段状のデータは約20〜23分周期で似た形になるため、谷が複数できることがあります。"
+                   "採用値が実験記録と合わないときは、サイドバーで「手動指定」にしてください。")
 
     tab_chart, tab_summary, tab_all = st.tabs(["📈 グラフ", "📋 定常状態の平均値", "🗂️ 全データ"])
 
